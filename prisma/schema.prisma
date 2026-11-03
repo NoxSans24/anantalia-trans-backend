@@ -1,0 +1,10 @@
+generator client {
+  provider               = "prisma-client"
+  output                 = "../src/generated/prisma"
+  generatedFileExtension = "ts"
+  importFileExtension    = "ts"
+}
+
+datasource db {
+  provider = "postgresql"
+}

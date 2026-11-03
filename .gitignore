@@ -24,6 +24,7 @@ build/
 
 # Prisma generated client (if generated into the default location)
 node_modules/.prisma/
+src/generated/prisma/
 
 # Local databases, dumps, and backups
 *.db

@@ -1,157 +1,130 @@
 # Backend Foundation
 
-## Tujuan dan konteks
+## Tujuan dan batas
 
-Backend Anantalia Trans akan menyediakan layanan sisi server untuk produk digital perusahaan. Repository backend dikelola Tim Anantalia Trans dan terpisah dari repository Frontend. Dokumen ini mencatat keputusan yang telah disetujui, arah arsitektur yang diusulkan, serta pekerjaan yang belum diputuskan atau diimplementasikan.
+Backend Anantalia Trans adalah layanan sisi server yang direncanakan untuk mendukung produk digital perusahaan. Backend dan Frontend berada di repository terpisah. Dokumen ini menjelaskan baseline keputusan dan arah arsitektur; dokumen ini bukan spesifikasi lengkap atau bukti bahwa aplikasi tersedia.
 
-## Status pernyataan
+Gunakan status secara terpisah untuk setiap keputusan dan kemampuan:
 
-- **Approved decision**: keputusan yang telah disetujui dan menjadi batas implementasi.
-- **Proposed architectural direction**: prinsip rancangan untuk memandu implementasi; detailnya belum divalidasi.
-- **Pending decision**: keputusan yang belum dibuat.
-- **Not implemented**: belum ada kode atau konfigurasi yang menerapkannya.
-- **Not yet validated**: belum dibuktikan melalui implementasi, pengujian, atau tinjauan operasional.
+- **APPROVED**: keputusan owner disetujui untuk cakupan yang disebutkan.
+- **PROPOSED**: arah teknis yang direkomendasikan, belum menjadi keputusan implementasi.
+- **PENDING**: rincian atau keputusan belum tersedia.
+- **NOT IMPLEMENTED**: belum diterapkan dalam aplikasi.
+- **NOT TESTED**: belum ada bukti pengujian untuk lingkup tersebut.
+- **PARTIALLY VALIDATED**: sebagian bukti terbatas tersedia; cakupan sisanya tetap terbuka.
+- **BLOCKED**: pekerjaan atau aktivasi tertentu menunggu keputusan, prasyarat, atau bukti yang disebutkan.
 
-## Kepemilikan dan stack
+Satu area dapat memiliki beberapa status sekaligus. Approval keputusan tidak menyatakan fitur telah diimplementasikan, diuji, atau siap produksi.
 
-### Approved decision
+## Ownership, repository, dan stack
 
-- Pemilik backend: Tim Anantalia Trans.
-- Maintainer: Muhammad Ihsan Hanafi.
+### APPROVED — keputusan owner
+
+- Backend dimiliki Tim Anantalia Trans; maintainer Muhammad Ihsan Hanafi.
 - Backend dan Frontend menggunakan repository terpisah.
-- Nama repository: `anantalia-trans-backend`.
-- Node.js 26.x, JavaScript, Express 5.x, dan npm.
+- Nama repository Backend: `NoxSans24/anantalia-trans-backend`; hosting/management menggunakan akun GitHub repository Frontend.
+- Stack: Node.js 26.x, JavaScript, Express 5.x, npm, PostgreSQL 18, Prisma 7.x, Prisma Migrate.
+
+### Status repository saat ini
+
+Repository ini telah dibuat, branch aktif `main`, dan initial commit telah di-push. Pernyataan historis bahwa repository belum dibuat atau pembuatannya belum diizinkan telah **superseded** oleh kronologi tersebut. Tanggal, bukti, dan rincian otorisasi pembuatan tidak ditambahkan karena tidak tercatat dalam sumber yang tersedia. Status ini tidak memberi izin untuk mengubah remote, branch, commit, atau konfigurasi Git.
+
+### Validasi teknologi
+
+- Pilihan stack: **APPROVED**.
+- Fixture Express/Node.js/npm: **PARTIALLY VALIDATED** menurut bukti T4.3.1.1 yang dirujuk oleh dokumen T4.2/T4.3.
+- Prisma/PostgreSQL/Migrate: **PARTIALLY VALIDATED**; T4.3.2 tetap berstatus **PARTIALLY COMPLETED**. Hasil fixture tertentu dilaporkan lulus dan tidak diulang pada audit terakhir.
+- Local Express bootstrap: **IMPLEMENTED**; unit tests 8/8 **PASS**; startup, health HTTP 200, dan Ctrl+C shutdown **PASS** pada Node 26.13.0.
+- Prisma/PostgreSQL development integration: **PASS** pada PostgreSQL 18 dan database kosong `anantalia_backend_dev`; production integration tetap **NOT TESTED**.
+- Business API dan database produksi: **NOT IMPLEMENTED**, **NOT TESTED**.
+
+## Arah arsitektur aplikasi
+
+### PROPOSED — belum diimplementasikan
+
+- Mulai dengan satu aplikasi modular. Kelompokkan kode berdasarkan domain yang sudah dikonfirmasi.
+- Pisahkan tanggung jawab transport/HTTP, application/domain services, akses data, dan adapter integrasi.
+- Public API dan Admin API memiliki pipeline serta kebijakan terpisah. Public tidak memerlukan sesi Admin. Admin memerlukan autentikasi dan otorisasi server-side untuk setiap operasi.
+- Middleware menangani batas transport seperti request ID, parsing, validasi, session/CSRF bila relevan, dan error mapping. Urutan serta kontrak middleware belum divalidasi pada aplikasi Backend.
+- Validasi input dilakukan pada trust boundary. Error untuk client tidak membocorkan stack, SQL, credential, atau data sensitif.
+- Tidak ada akses database langsung dari browser. Response publik menggunakan allowlist data yang memang disetujui untuk publik.
+
+Detail modul, route, DTO, permission identifier, error envelope, framework middleware, dan kontrak API per fitur perlu dibekukan secara bertahap. Nama route atau contoh API dari dokumen sumber tetap berstatus kontrak target kecuali dinyatakan secara eksplisit sebagai keputusan.
+
+## Identitas, authentication, dan RBAC
+
+### APPROVED — keputusan scoped
+
+- Intent awal mencakup self-hosted dan OIDC. Self-hosted mengharuskan setiap akun memiliki email dan username; login menerima salah satunya. Registrasi publik tidak tersedia.
+- MFA diwajibkan untuk semua role; platform passkeys dan security keys diterima.
+- NIST SP 800-63B-4 (2025) dipilih sebagai password baseline. Ini bukan klaim compliance.
+- Sesi non-persisten dipilih; kebijakan rate-limit login dan password reset dipisah.
+- OWN-009 menyetujui matriks grant enam aksi untuk sepuluh modul. Batas Manage Users terpisah dan hanya SUPER_ADMIN mengelola akun ADMIN/STAFF.
+- Q-RBAC-011 menyetujui batas field akun dan pemisahan My Profile secara scoped. Q-RBAC-012 menyetujui perlindungan SUPER_ADMIN aktif terakhir. Q-RBAC-013 menyetujui perubahan mapping melalui konfigurasi/seed yang ditinjau serta katalog role/permission read-only.
+
+### PENDING
+
+OIDC provider/issuer/claims/linking; normalisasi identifier; enrollment dan recovery MFA; TTL/idle/max session dan revoke events; rate-limit threshold; password applicability owner; email provider, token expiry dan initiator; authority/workflow break-glass; pembaca katalog role/permission; detail My Profile API; serta aturan field/workflow per domain belum lengkap. Lihat [decision reconciliation](decision-reconciliation.md).
+
+### NOT IMPLEMENTED / NOT TESTED
+
+Belum ada login, session, MFA, OIDC, authentication, authorization, permission engine, account API, atau audit runtime. Matriks grant dan invariant bukan bukti implementasi atau negative authorization test.
+
+## Database, transaksi, dan migration
+
+### APPROVED
+
 - PostgreSQL 18, Prisma 7.x, dan Prisma Migrate.
-- Repository GitHub bersifat public; rahasia dan data operasional tidak boleh dimasukkan.
+- DB-001: pilihan owner adalah `content_key` unik secara global.
+- DB-002: pilihan owner adalah composite foreign key untuk invariant kategori/model.
 
-### Not implemented
+### PROPOSED
 
-Belum ada `package.json`, dependency, aplikasi Express, Prisma schema, migration, koneksi database, endpoint, atau test suite.
+Tinjau dan version-kan perubahan schema lewat migration. Gunakan constraint database bersama validasi aplikasi; tentukan batas transaksi pada use case yang memerlukan konsistensi. Desain target menyebut booking, initial status history, dan audit sebagai satu unit persistensi sebelum respons sukses.
 
-## Batas tanggung jawab
+### PENDING / NOT TESTED
 
-### Proposed architectural direction
+Schema final, DDL DB-001/DB-002, locale/content lifecycle, snapshot dan recategorization behavior, semantik uniqueness identity eksternal, transaction coverage domain, migration failure/repair/drift, backup policy, retention, RPO/RTO, dan recovery ownership belum ditetapkan atau divalidasi penuh. Tidak ada schema atau migration di repository ini.
 
-Backend bertanggung jawab atas pemrosesan sisi server, aturan domain yang kelak disepakati, akses data, dan kontrak API. Frontend bertanggung jawab atas antarmuka pengguna dan interaksi client. Frontend berkomunikasi dengan backend melalui kontrak API yang terdokumentasi; detail kontraknya belum ditetapkan.
+## Configuration, logging, security, dan testing
 
-### Pending decision
+### PROPOSED
 
-Daftar domain, integrasi eksternal, kontrak API, dan pembagian tanggung jawab rinci perlu disepakati bersama pemilik produk dan tim Frontend.
+- Simpan konfigurasi per environment di luar source. Validasi konfigurasi wajib saat startup.
+- Rahasia tidak boleh masuk repository public, log, URL, atau response. Gunakan sumber secret yang disetujui saat dipilih.
+- Gunakan log terstruktur yang diminimalkan dan satu alur audit yang dapat ditinjau; jangan log password, token mentah, cookie/session secret, atau payload credential.
+- Terapkan security by default: deny-by-default untuk grant yang tidak disetujui, query terparameterisasi, batas request yang jelas, allowlist input/output, dan kontrol CSRF untuk mutasi berbasis cookie setelah topology ditentukan.
+- Gunakan unit, integration, contract, authorization, security, migration/recovery, dan browser tests sesuai risiko dengan data sintetis.
 
-## Public API dan Admin API
+### PENDING / NOT TESTED
 
-### Proposed architectural direction
+Nama variabel environment untuk kontrol operasional, secret manager, logging provider/event catalog/retensi, role pembaca, monitoring, alert, readiness contract, CI platform, cakupan test penuh, dan operator masih PENDING. Bootstrap memiliki validasi environment dasar, safe structured logs dan unit test; kontrol operasi penuh dan test suite menyeluruh NOT IMPLEMENTED / NOT TESTED.
 
-Pisahkan public API dan admin API secara jelas pada routing, dokumentasi, dan kebijakan akses agar antarmuka publik tidak mewarisi akses administratif. Terapkan validasi dan kontrol akses sesuai kebutuhan setiap permukaan API.
+## Prinsip domain yang telah diputuskan
 
-### Pending decision
-
-Prefix, versi, hostname, autentikasi, otorisasi, role, permission, dan batas akses belum ditentukan. Tidak ada role atau permission yang diasumsikan oleh dokumen ini.
-
-### Not implemented
-
-Belum ada route public atau admin, autentikasi, authorization, maupun RBAC.
-
-## Modular architecture
-
-### Proposed architectural direction
-
-Kelompokkan implementasi berdasarkan domain saat domain diketahui. Jaga pemisahan tanggung jawab antara transport/API, logika domain, dan akses data; hindari ketergantungan silang yang tidak diperlukan. Bentuk modul mengikuti kebutuhan nyata, bukan asumsi domain di muka.
-
-### Pending decision
-
-Daftar modul, batas domain, dan pola folder final belum ditetapkan.
-
-## Validasi input dan error handling
-
-### Proposed architectural direction
-
-Validasi input pada batas masuk sebelum pemrosesan domain atau akses database. Berikan respons error yang konsisten dan aman untuk client; jangan mengirim detail internal atau rahasia. Catat konteks yang cukup untuk diagnosis tanpa mencatat kredensial atau data sensitif yang tidak diperlukan.
-
-### Pending decision
-
-Format error, status code per kasus, library validasi, dan kebijakan redaksi log belum ditetapkan.
-
-## Database dan migration
-
-### Approved decision
-
-Database yang dipilih adalah PostgreSQL 18. Prisma 7.x digunakan sebagai ORM dan Prisma Migrate sebagai alat migration.
-
-### Proposed architectural direction
-
-Perubahan struktur database harus dikelola melalui migration yang ditinjau dan disimpan bersama source. Perubahan schema dan data perlu mempertimbangkan kompatibilitas serta strategi pemulihan sebelum diterapkan ke lingkungan bersama.
-
-### Pending decision
-
-Schema, model data, strategi deployment dan rollback migration, backup, serta kebijakan retensi belum ditetapkan.
-
-### Not implemented
-
-Belum ada schema, migration, database lokal atau remote, maupun konfigurasi koneksi.
-
-## Security by default
-
-### Proposed architectural direction
-
-Validasi data yang tidak tepercaya, batasi akses sesuai kebutuhan, gunakan konfigurasi aman per lingkungan, dan hindari mengekspos rahasia atau detail internal. Rahasia tidak boleh disimpan di repository public; gunakan placeholder aman dalam contoh dokumentasi.
-
-### Pending decision
-
-Model autentikasi, otorisasi, pengelolaan secret, kebijakan CORS, rate limiting, dan kebutuhan keamanan spesifik domain perlu ditentukan sebelum implementasi terkait.
-
-### Not implemented
-
-Belum ada mekanisme keamanan aplikasi yang diterapkan.
-
-## Logging dan auditability
-
-### Proposed architectural direction
-
-Logging sebaiknya cukup terstruktur untuk diagnosis dan audit perubahan penting, dengan akses dan retensi yang sesuai. Jangan mencatat token, password, connection string, atau data sensitif yang tidak diperlukan.
-
-### Pending decision
-
-Library, format, tujuan pengiriman, retensi, cakupan audit, dan kontrol akses log belum ditetapkan.
-
-### Not implemented
-
-Belum ada sistem logging atau audit.
-
-## Konfigurasi environment
-
-### Proposed architectural direction
-
-Pisahkan konfigurasi per lingkungan dari source code. Validasi konfigurasi yang dibutuhkan saat aplikasi mulai berjalan. Contoh yang aman boleh menggunakan placeholder; nilai rahasia lokal dan file environment aktual tidak boleh masuk ke Git.
-
-### Pending decision
-
-Daftar variabel, sumber secret, konfigurasi per lingkungan, dan perilaku aplikasi saat konfigurasi tidak lengkap belum ditetapkan.
-
-### Not implemented
-
-Belum ada konfigurasi aplikasi atau contoh environment.
-
-## Testing
-
-### Proposed architectural direction
-
-Tambahkan pengujian sesuai batas modul dan risiko: unit untuk perilaku domain, integrasi untuk kolaborasi dengan database atau adapter, serta pengujian kontrak API saat kontrak telah ditentukan. Pengujian harus dapat dijalankan dengan data non-produksi dan tanpa rahasia nyata.
-
-### Pending decision
-
-Framework, cakupan minimum, strategi fixture, serta penggunaan database untuk pengujian belum diputuskan.
-
-### Not implemented dan Not yet validated
-
-Belum ada test suite, dan tidak ada perilaku aplikasi yang dapat divalidasi saat ini.
+- Booking awal berstatus `waiting_confirmation`, bukan reservasi terkonfirmasi. Request harus tersimpan sebelum handoff.
+- Handoff WhatsApp manual; link aktif memerlukan nomor bisnis resmi yang diverifikasi. Klik/link bukan bukti aplikasi terbuka atau pesan terkirim.
+- Kategori, model, opsi rental per model, dan unit fisik adalah konsep berbeda.
+- Data dummy/prototipe tidak menjadi data operasional tanpa sumber dan persetujuan yang sesuai.
+- Pricing tidak menjadi prasyarat booking request pada baseline saat ini.
 
 ## Ringkasan status
 
 | Area | Status |
-| --- | --- |
-| Ownership, nama repository, dan stack | Approved decision |
-| Batas modul, API, dan prinsip operasional | Proposed architectural direction |
-| Endpoint, schema, role, permission, dan aturan bisnis | Pending decision |
-| Aplikasi, dependency, database, migration, dan pengujian | Not implemented |
-| Kesesuaian rancangan dengan kebutuhan operasional | Not yet validated |
+|---|---|
+| Stack dan ownership | APPROVED |
+| Repository dibuat, `main`, initial commit di-push | Status saat ini; kronologi tanpa tanggal/bukti otorisasi tambahan |
+| Struktur modular, pemisahan API, layer dan validation/error handling | PROPOSED; NOT IMPLEMENTED |
+| OWN-009 dan batas akun | APPROVED; detail domain tertentu PENDING; implementasi dan tes NOT IMPLEMENTED/NOT TESTED |
+| DB-001/DB-002 | APPROVED; DDL/schema validation PENDING/NOT TESTED |
+| Fixture teknologi T4.3 | PARTIALLY VALIDATED; T4.3.2 PARTIALLY COMPLETED |
+| Express bootstrap, `/health`, safe error handling, environment validation | IMPLEMENTED; 8/8 unit tests PASS; Node 26 startup, HTTP health, Ctrl+C shutdown PASS |
+| Prisma Client generation/configuration | IMPLEMENTED; generate/validate PASS; PostgreSQL 18 development integration PASS |
+| Business API, database production, auth, CI/CD, deployment | NOT IMPLEMENTED; NOT TESTED |
+| Auth operasional, aturan fitur dan operasi produksi | PENDING; fitur terkait BLOCKED dari aktivasi produksi |
+
+Lihat [Decision Reconciliation](decision-reconciliation.md) untuk keputusan dan konflik sumber, serta [Implementation Readiness](implementation-readiness.md) untuk blocker dan urutan kerja.
+
+## Bootstrap implementation boundary
+
+The initial local bootstrap adds Express application/server modules, required environment validation, loopback default binding, a 100 KB JSON body limit, request IDs, allowlisted structured logs, centralized safe errors, not-found handling, graceful shutdown, and `GET /health` using `SELECT 1`. The Prisma 7 PostgreSQL adapter and an empty PostgreSQL schema are configured; there are no business models or migrations. T4.6.1 validated Node 26.13.0 startup, 8/8 unit tests, Prisma validate/generate, one database integration health test, and Ctrl+C shutdown against local PostgreSQL 18 database `anantalia_backend_dev`. The legacy `backend_validation` database was not used or changed. These results cover local development only and do not imply production readiness.
