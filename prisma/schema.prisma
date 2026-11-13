@@ -8,3 +8,382 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+model User {
+  id             String         @id @default(uuid()) @db.Uuid
+  email          String         @unique
+  username       String         @unique
+  displayName    String?
+  passwordHash   String?
+  status          UserStatus
+  deletedAt       DateTime?      @db.Timestamptz(6)
+  createdAt       DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  roles           UserRole[]
+  oidcIdentities   OIDCIdentity[]
+  sessions         AdminSession[]
+  mfaCompletions    MfaCompletion[]
+  mfaChallenges     MfaChallenge[]
+  totpFactors       TotpFactor[]
+  activityLogs      ActivityLog[] @relation("ActivityLogActor")
+  targetActivityLogs ActivityLog[] @relation("ActivityLogTarget")
+  updatedFleetOptions VehicleRentalOption[] @relation("FleetOptionUpdater")
+}
+
+model VehicleCategory {
+  id          String         @id @default(uuid()) @db.Uuid
+  slug        String         @unique
+  name        String
+  description String?
+  isActive    Boolean        @default(true)
+  sortOrder   Int            @default(0)
+  createdAt   DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  models      VehicleModel[]
+
+  @@index([isActive, sortOrder, name])
+}
+
+model VehicleModel {
+  id          String                @id @default(uuid()) @db.Uuid
+  categoryId  String                @db.Uuid
+  slug        String                @unique
+  name        String
+  description String?
+  seatCount   Int?
+  publicSpecs Json?
+  isActive    Boolean               @default(true)
+  isVerified  Boolean               @default(false)
+  createdAt   DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  category      VehicleCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  rentalOptions VehicleRentalOption[]
+  units         VehicleUnit[]
+
+  @@index([categoryId, isActive, isVerified, name])
+}
+
+model VehicleRentalOption {
+  modelId     String        @db.Uuid
+  rentalType  String        @db.VarChar(20)
+  isEnabled   Boolean       @default(false)
+  updatedById String?       @db.Uuid
+  updatedAt   DateTime      @default(now()) @updatedAt @db.Timestamptz(6)
+  model       VehicleModel  @relation(fields: [modelId], references: [id], onDelete: Restrict)
+  updatedBy   User?         @relation("FleetOptionUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@id([modelId, rentalType])
+  @@index([rentalType, isEnabled])
+}
+
+model MfaCompletion {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  proofHash  Bytes    @unique
+  purpose    String
+  expiresAt  DateTime @db.Timestamptz(6)
+  consumedAt DateTime? @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, purpose, expiresAt, consumedAt])
+  @@index([expiresAt])
+}
+
+model MfaChallenge {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @db.Uuid
+  challengeHash Bytes    @unique
+  purpose       String
+  expiresAt     DateTime @db.Timestamptz(6)
+  consumedAt    DateTime? @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, purpose, expiresAt, consumedAt])
+  @@index([expiresAt])
+}
+
+enum TotpFactorStatus {
+  PENDING
+  ACTIVE
+  REVOKED
+}
+
+model TotpFactor {
+  id                    String           @id @default(uuid()) @db.Uuid
+  userId                String           @db.Uuid
+  status                TotpFactorStatus @default(PENDING)
+  encryptedSecret       Bytes
+  secretNonce           Bytes
+  secretAuthTag         Bytes
+  encryptionKeyId       String
+  createdAt             DateTime         @default(now()) @db.Timestamptz(6)
+  confirmedAt           DateTime?        @db.Timestamptz(6)
+  revokedAt             DateTime?        @db.Timestamptz(6)
+  lastAcceptedTimeStep  BigInt?
+  user                  User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, status])
+}
+
+model Role {
+  id          String         @id @default(uuid()) @db.Uuid
+  code        String         @unique
+  userRoles   UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id    String           @id @default(uuid()) @db.Uuid
+  code  String           @unique
+  roles RolePermission[]
+}
+
+model UserRole {
+  userId     String   @db.Uuid
+  roleId     String   @db.Uuid
+  assignedAt DateTime @default(now()) @db.Timestamptz(6)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@id([userId, roleId])
+  @@index([roleId, userId])
+}
+
+model RolePermission {
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  grantedAt    DateTime   @default(now()) @db.Timestamptz(6)
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Restrict)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId, roleId])
+}
+
+model OIDCIdentity {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  issuer    String
+  subject   String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([issuer, subject])
+  @@index([userId])
+}
+
+model AdminSession {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @db.Uuid
+  tokenHash         Bytes    @unique
+  createdAt         DateTime @default(now()) @db.Timestamptz(6)
+  lastActivityAt    DateTime @default(now()) @db.Timestamptz(6)
+  idleExpiresAt     DateTime @db.Timestamptz(6)
+  absoluteExpiresAt DateTime @db.Timestamptz(6)
+  revokedAt         DateTime? @db.Timestamptz(6)
+  user              User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, revokedAt])
+  @@index([idleExpiresAt])
+  @@index([absoluteExpiresAt])
+}
+
+model ActivityLog {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actor          String    @db.Uuid
+  action         String    @db.VarChar(50)
+  resourceType   String?   @db.VarChar(50)
+  resourceId     String?   @db.Uuid
+  targetUserId   String?   @db.Uuid
+  details        Json?
+  ipAddress      String?   @db.VarChar(45)
+  userAgent      String?   @db.VarChar(500)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  actorUser      User      @relation("ActivityLogActor", fields: [actor], references: [id], onDelete: Restrict)
+  targetUser     User?     @relation("ActivityLogTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([actor])
+  @@index([action])
+  @@index([targetUserId])
+  @@index([createdAt])
+  @@index([actor, createdAt])
+}
+
+model Booking {
+  id              String   @id @default(uuid()) @db.Uuid
+  bookingCode     String   @unique @db.VarChar(20)
+  customerName    String   @db.VarChar(150)
+  whatsappPhone   String   @db.VarChar(20)
+  categoryId      String   @db.VarChar(100)
+  modelId         String   @db.VarChar(100)
+  rentalType      String   @db.VarChar(20)
+  startsOn        String   @db.VarChar(10)
+  endsOn          String   @db.VarChar(10)
+  pickupLocation  String   @db.VarChar(500)
+  additionalNotes String?
+  status          String   @default("waiting_confirmation") @db.VarChar(30)
+  statusLabel     String   @db.VarChar(50)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  unitAssignments BookingUnitAssignment[]
+
+  @@index([status, createdAt])
+  @@index([whatsappPhone, status])
+  @@index([categoryId, modelId, rentalType])
+}
+
+model Customer {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(150)
+  phone     String?  @db.VarChar(30)
+  email     String?  @db.VarChar(254)
+  notes     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@index([isActive, createdAt])
+  @@index([name])
+  @@index([email])
+}
+
+model PricingRule {
+  id          String   @id @default(uuid()) @db.Uuid
+  modelId     String   @db.VarChar(100)
+  rentalType  String   @db.VarChar(20)
+  baseRate    Float
+  currency    String   @default("IDR") @db.VarChar(10)
+  billingUnit String   @default("day") @db.VarChar(30)
+  notes       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@index([modelId, rentalType, isActive])
+  @@index([createdAt])
+}
+
+model FinanceTransaction {
+  id          String   @id @default(uuid()) @db.Uuid
+  type        String   @db.VarChar(20)
+  amount      Float
+  category    String   @default("general") @db.VarChar(100)
+  description String?
+  bookingId   String?  @db.VarChar(100)
+  date        String   @db.VarChar(10)
+  status      String   @default("recorded") @db.VarChar(30)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@index([type, date])
+  @@index([category])
+  @@index([createdAt])
+}
+
+model InboxMessage {
+  id          String             @id @default(uuid()) @db.Uuid
+  senderName  String             @db.VarChar(150)
+  senderEmail String?            @db.VarChar(254)
+  subject     String?            @db.VarChar(250)
+  content     String
+  status      String             @default("unread") @db.VarChar(20)
+  createdAt   DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime           @default(now()) @updatedAt @db.Timestamptz(6)
+  notes       InboxMessageNote[]
+
+  @@index([status, createdAt])
+}
+
+model InboxMessageNote {
+  id        String       @id @default(uuid()) @db.Uuid
+  messageId String       @db.Uuid
+  note      String
+  authorId  String?      @db.VarChar(100)
+  createdAt DateTime     @default(now()) @db.Timestamptz(6)
+  message   InboxMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, createdAt])
+}
+
+model ContentItem {
+  id         String   @id @default(uuid()) @db.Uuid
+  title      String   @db.VarChar(250)
+  slug       String?  @unique @db.VarChar(150)
+  contentKey String?  @unique @db.VarChar(150)
+  body       String   @default("")
+  section    String   @default("general") @db.VarChar(100)
+  status     String   @default("draft") @db.VarChar(20)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@index([status, section, createdAt])
+}
+
+model SystemSetting {
+  key       String   @id @db.VarChar(100)
+  value     String
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+}
+
+model VehicleUnit {
+  id                 String                  @id @default(uuid()) @db.Uuid
+  modelId            String                  @db.Uuid
+  plateNumber        String                  @unique @db.VarChar(24)
+  year               Int
+  status             String                  @default("available") @db.VarChar(24)
+  odometerKm         Int?
+  lastServiceDate    String?                 @db.VarChar(10)
+  nextServiceDate    String?                 @db.VarChar(10)
+  notes              String?
+  version            Int                     @default(1)
+  isActive           Boolean                 @default(true)
+  createdAt          DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
+  model              VehicleModel            @relation(fields: [modelId], references: [id], onDelete: Restrict)
+  maintenances       VehicleMaintenance[]
+  bookingAssignments BookingUnitAssignment[]
+
+  @@index([modelId, status, isActive])
+  @@index([nextServiceDate])
+}
+
+model VehicleMaintenance {
+  id          String      @id @default(uuid()) @db.Uuid
+  unitId      String      @db.Uuid
+  serviceType String      @db.VarChar(100)
+  serviceDate String      @db.VarChar(10)
+  odometerKm  Int?
+  costAmount  Int         @default(0)
+  status      String      @default("scheduled") @db.VarChar(24)
+  notes       String?
+  createdAt   DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime    @default(now()) @updatedAt @db.Timestamptz(6)
+  unit        VehicleUnit @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  @@index([unitId, serviceDate])
+  @@index([status, serviceDate])
+}
+
+model BookingUnitAssignment {
+  id         String      @id @default(uuid()) @db.Uuid
+  bookingId  String      @db.Uuid
+  unitId     String      @db.Uuid
+  status     String      @default("assigned") @db.VarChar(24)
+  assignedBy String?     @db.Uuid
+  assignedAt DateTime    @default(now()) @db.Timestamptz(6)
+  releasedAt DateTime?   @db.Timestamptz(6)
+  notes      String?
+  booking    Booking     @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  unit       VehicleUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId, status])
+  @@index([unitId, status])
+}

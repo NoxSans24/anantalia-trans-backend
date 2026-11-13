@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: anantalia-trans-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRUST_PROXY
+        value: "2"
+      - key: DATABASE_URL
+        sync: false
+      - key: CSRF_SECRET
+        sync: false
+      - key: TOTP_ACTIVE_KEY_ID
+        value: key-2026-01
+      - key: TOTP_KEYRING
+        sync: false
+      - key: ARGON2_MEMORY_COST
+        value: "19456"
+      - key: ARGON2_TIME_COST
+        value: "2"
+      - key: ARGON2_PARALLELISM
+        value: "1"
+      - key: ARGON2_HASH_LENGTH
+        value: "32"

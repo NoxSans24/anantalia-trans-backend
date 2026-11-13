@@ -8,18 +8,36 @@
 
 Repository sudah ada, branch `main`, dan initial commit telah di-push. Keputusan ownership/repository OWN-003 APPROVED; catatan lama tentang repository belum dibuat telah superseded. Tanggal dan bukti otorisasi tidak tercatat dalam sumber, sehingga tidak diasumsikan.
 
+## Current repository audit — 6 November 2026
+
+Bagian berikut adalah snapshot implementasi source saat ini dan mengesampingkan klaim implementasi yang lebih lama di tabel/timeline bawah; bukti database dan laporan test historis tetap hanya berlaku untuk tanggal/scope saat dijalankan.
+
+| Area | Kondisi source saat ini | Verifikasi pada audit ini |
+|---|---|---|
+| Runtime | Node 24.20.0 pada host validasi (mendukung `engines: >=24 <27`); PostgreSQL 16.15 aktif pada `127.0.0.1:5432`. | `node --version`, `pg_isready -h 127.0.0.1 -p 5432`, `node connection-check.mjs` (PASS). |
+| Auth HTTP | Local login lalu MFA/TOTP, session read/rotate/logout, CSRF, account admin, dan self-profile routes terpasang saat secrets/keys/config tersedia. | Unit/HTTP tests (PASS) dan PostgreSQL integration tests (`http-auth.test.js`, `authentication-orchestration.test.js`, `totp-factor.test.js`, `mfa-challenge.test.js`, `session.service.test.js` — 27/27 PASS pada `127.0.0.1:5432/anantalia_validation_test`). |
+| RBAC/account | Permission service, OWN-009 role grants, lifecycle/session revocation, audit events, dan proteksi SUPER_ADMIN terakhir ada di source. | Unit & negative RBAC tests lulus; PostgreSQL integration tests (`account-lifecycle.test.js`, `admin-account-management.test.js`, `auth.constraints.test.js`) lulus pada `anantalia_validation_test`. |
+| Schema/migrations | 22 model Prisma (Auth, MFA/TOTP, ActivityLog, Fleet, Booking, Customer, PricingRule, FinanceTransaction, InboxMessage, InboxMessageNote, ContentItem, SystemSetting) dan 8 migration SQL tersedia. | `npm run prisma:validate`, `npm run prisma:migrate:test` (8/8 migrasi diterapkan & diverifikasi idempoten pada `anantalia_validation_test`), dan `npm run test:db` (27/27 PASS). |
+| Migration safety | Exact disposable target validation, opt-in `I_CONFIRM_DISPOSABLE_DATABASE`, preflight SQL `checkTestDatabase()`, direct CLI datasource guard, dan `prisma:migrate:test`. | Unit guard tests dan live preflight SQL (`{"database":"anantalia_validation_test","role":"validation_user","server_address":"127.0.0.1","server_port":5432}`) lulus. |
+| Business API | Seluruh 10 modul (`fleet`, `dashboard`, `booking`, `customer`, `pricing`, `finance`, `inbox`, `content`, `analytics`, `settings`) terimplementasi dengan Prisma repositories dan terintegrasi dengan Admin Panel serta Public Website. | 183/183 backend unit/contract tests lulus; 27/27 PostgreSQL integration tests lulus (`business-persistence.test.js`); real PostgreSQL 3-server Chrome headless E2E lulus termasuk persistensi setelah restart backend. |
+| API contract | [OpenAPI](../api/openapi.yaml) mendeskripsikan seluruh route `/health`, `/auth/*`, `/api/*`, `/api/v1/public/*`, dan `/api/v1/admin/*` yang terpasang. | Contract tests otomatis memverifikasi kesesuaian route dan schema respons. |
+| Security/deployment | Security headers, session-bound HMAC CSRF, Argon2id validation, error sanitization pada semua route, dan rate limiting untuk login, MFA, serta public booking tersedia. Panduan deployment tersedia di [Production Deployment Guide](../operations/production-deployment-guide.md) dan daftar keputusan owner di [Owner Sign-Off Checklist](../operations/owner-signoff-checklist.md). | Security negative tests lulus; multi-instance rate limit store, TLS/reverse-proxy produksi, konfirmasi keputusan bisnis owner (`PENDING_OWNER_CONFIRMATION`), dan backup/restore host produksi tetap harus diselesaikan sebelum go-live produksi. |
+
+Readiness teknis lokal dan integrasi PostgreSQL (`127.0.0.1:5432/anantalia_validation_test`): **VERIFIED**. Readiness rilis produksi tetap menunggu penyelesaian keputusan bisnis owner ([Owner Sign-Off Checklist](../operations/owner-signoff-checklist.md)) dan infrastruktur produksi ([Final Readiness Report](../operations/final-readiness-report.md)).
+
 ## Readiness per area
 
 | Area | Status | Arti untuk tahap berikutnya |
 |---|---|---|
 | Stack dan ownership | APPROVED | Pertahankan pilihan stack serta owner/maintainer yang disetujui. |
 | Local Express bootstrap | IMPLEMENTED; Node 26.13.0 startup, 8/8 unit tests, actual health, Ctrl+C shutdown PASS | Satu `GET /health`, error/not-found handling, environment validation, request limit, safe structured logs, dan graceful shutdown; belum mencakup fitur bisnis. |
-| Prisma 7 setup | IMPLEMENTED; generate/validate PASS; PostgreSQL 18 development integration PASS | Adapter PostgreSQL dan schema kosong tersedia; tidak ada business model/migration. Production database remains NOT TESTED. |
+| Prisma 7 setup | IMPLEMENTED; generate/validate PASS; PostgreSQL 18 development integration PASS | Adapter PostgreSQL tersedia. Auth/RBAC foundation schema/migration diterapkan pada development `anantalia_backend_dev`; tidak ada seed atau business model. Production database remains NOT TESTED. |
 | Node/Express/npm fixture | PARTIALLY VALIDATED | T4.3 fixture evidence tetap partial; T4.6.1 membuktikan bootstrap lokal pada Node 26.13.0/npm 11.19.0. |
-| PostgreSQL/Prisma/Migrate | Development health PASS; T4.3.2 PARTIALLY COMPLETED | T4.6.1 memakai database baru `anantalia_backend_dev`, kosong dan terpisah dari `backend_validation`; schema bisnis/migration dan production topology tetap belum diuji. Lanjutkan validasi failure/repair/drift serta backup/recovery hanya di lingkungan berizin. |
+| PostgreSQL/Prisma/Migrate | Development health PASS; auth foundation migration deployed to `anantalia_backend_dev`; T4.3.2 PARTIALLY COMPLETED | Database terpisah dari `backend_validation`; tidak ada seed. Schema bisnis/production topology tetap belum diuji. Lanjutkan validasi failure/repair/drift serta backup/recovery hanya di lingkungan berizin. |
 | Public/Admin modular foundation | PROPOSED; NOT IMPLEMENTED; NOT TESTED | Rancang pipeline, layer, error/validation middleware dan kontrak; jangan anggap pemisahan telah teruji. |
 | OWN-009 grants | APPROVED; NOT IMPLEMENTED; NOT TESTED | Implementasikan persis matriks yang disetujui dengan negative tests; deny tambahan secara default. |
-| Auth/OIDC/MFA/session | Sebagian APPROVED; rincian PENDING; NOT IMPLEMENTED; NOT TESTED | Provider-specific auth, recovery, session policy, origin-integrated browser behavior dan MFA activation menunggu detail terkait. |
+| Authentication database foundation | User/Role/Permission/UserRole/RolePermission/OIDCIdentity/AdminSession schema dan migration development IMPLEMENTED; Prisma 7.10.1 validate/generate, deploy/status, katalog object PASS; migration applied dan up to date | Credential verifier, opaque token issue/hash runtime, login/OIDC/MFA, RBAC seed/engine, account lifecycle API NOT IMPLEMENTED / NOT TESTED. Argon2id parameters, cookie/CSRF policy, issuer configuration, granular permissions dan recovery tetap PENDING. |
+| Authentication core | Login input validation, trim/lower identifier helper, serta fail-closed authentication/authorization boundaries IMPLEMENTED; unit suite 16/16 PASS | Adapter tidak dikonfigurasi dan middleware belum dipasang pada route. Login endpoint, session runtime, MFA, OIDC, serta end-to-end auth NOT IMPLEMENTED / NOT TESTED. |
 | API target contract | PROPOSED; runtime NOT IMPLEMENTED | Bekukan kontrak per slice sebelum endpoint terkait dibuat. |
 | Data produksi, migration, katalog | PENDING; data migration BLOCKED sampai sumber/row disetujui | Development dengan synthetic fixtures atau database kosong dapat dilakukan; jangan import/publish data dummy. |
 | CI, deployment, monitoring, operasi | PENDING; NOT IMPLEMENTED; NOT TESTED | Pilih owner/platform dan buktikan prosedur sebelum staging/production. |
@@ -68,6 +86,13 @@ Jangan menyatakan hal berikut siap atau mengaktifkannya sebagai fitur produksi s
 Fondasi teknis menggunakan data sintetis dapat dikerjakan di scope implementasi terpisah. Daftar ini tidak memberi otorisasi untuk membuat aplikasi pada task dokumentasi ini.
 
 ## Evidence dan acceptance gates
+
+### T4.7.4 — Authentication Database Foundation
+
+- Prisma 7.10.1 schema validate/generate: **PASS**.
+- `20261103200256_auth_identity_session_foundation`: deployed ke PostgreSQL 18 development `anantalia_backend_dev`; migration status **up to date**.
+- Unit tests: **16/16 PASS**. Database integration tests: **2/2 PASS**, termasuk health check serta verifikasi katalog tabel/index/trigger/check constraints dan tidak adanya seeded records.
+- Tidak ada data test yang ditulis; database `backend_validation` tidak dipakai. Auth runtime dan perilaku constraint dengan operasi tulis tidak diuji.
 
 ### T4.6.1 — Runtime & Database Validation
 

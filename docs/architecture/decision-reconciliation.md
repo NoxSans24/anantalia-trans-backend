@@ -4,6 +4,10 @@
 
 Dokumen ini menyelaraskan keputusan Admin Panel yang tercatat dengan baseline Backend. Sumber Admin Panel bersifat read-only untuk rekonsiliasi ini. Keputusan owner berlaku hanya pada cakupan yang disebutkan; status APPROVED tidak menyatakan implementasi atau validasi selesai.
 
+## Snapshot source terkini — 5 November 2026
+
+Status implementasi yang lebih lama pada tabel di bawah adalah catatan saat rekonsiliasi awal, bukan status source terkini. Backend saat ini memiliki login lokal yang dilanjutkan MFA/TOTP, session handling, auth HTTP routes, admin-account/profile routes, authorization checks, lifecycle service, permission seed function, dan activity logging. Unit/HTTP tests berjalan tanpa database; database-backed auth tests belum diverifikasi ulang pada disposable database. Enrollment/recovery MFA, OIDC, user onboarding, dan business API masih belum lengkap. Kontrak route yang benar-benar dipasang tercantum dalam [OpenAPI runtime](../api/openapi.yaml); target `/api/v1` pada Admin Panel tetap kontrak rencana.
+
 Status yang dipakai: **APPROVED**, **PROPOSED**, **PENDING**, **NOT IMPLEMENTED**, **NOT TESTED**, **PARTIALLY VALIDATED**, dan **BLOCKED**. Status dapat berlaku bersamaan pada satu area.
 
 Sumber utama: `docs/backend-foundation/t4.2/t4.2-decision-register.md` (register keputusan owner); `docs/backend/decision-log.md`; `docs/backend/business-confirmation-questions.md`; `docs/backend-foundation/t4.2/t4.2-owner-confirmation-checklist.md`; `docs/implementation-plan.md`; `docs/technical-design/technical-design.md`; `docs/technical-design/t3.3-technical-design-review.md`; `docs/api-specification.md`; serta ringkasan dan bukti T4.3.1/T4.3.2 di Admin Panel.
@@ -43,7 +47,7 @@ Enam aksi: Read, Create, Update, Delete/deactivate, Verify/approve, Export. Gran
 
 | ID | Keputusan | Status tersisa |
 |---|---|---|
-| Q-RBAC-011 | APPROVED secara scoped: SUPER_ADMIN mengelola field akun ADMIN/STAFF yang disepakati; email dan username wajib, unik/tervalidasi, perubahan email perlu verifikasi sebelum aktif; perubahan password lewat alur khusus dan perubahan sensitif diaudit. My Profile terpisah dan tidak dapat mengubah role/status sendiri. | Normalisasi, detail validasi, verifikasi, kontrak/API, audit runtime dan pengujian **PENDING / NOT IMPLEMENTED / NOT TESTED**. |
+| Q-RBAC-011 | APPROVED secara scoped: SUPER_ADMIN mengelola field akun ADMIN/STAFF yang disepakati; email dan username wajib, unik/tervalidasi, perubahan email perlu verifikasi sebelum aktif; perubahan password lewat alur khusus dan perubahan sensitif diaudit. My Profile terpisah dan tidak dapat mengubah role/status sendiri. T4.7.4 juga menyetujui trim+lowercase saat penyimpanan. | Email-change verification, detail validasi lainnya, kontrak/API, audit runtime dan pengujian lifecycle **PENDING / NOT IMPLEMENTED / NOT TESTED**. |
 | Q-RBAC-012 | Perlindungan semua operasi yang menghilangkan otoritas SUPER_ADMIN aktif terakhir disetujui, termasuk deactivation, deletion, demotion, suspension atau ekuivalen, dengan enforcement server-side. Break-glass mensyaratkan verifikasi independen, audit dan review. | Identitas recovery authority dan alur approval/execution **PENDING**. Invariant concurrency enforcement **NOT IMPLEMENTED / NOT TESTED**. Break-glass **BLOCKED** sampai owner menetapkan authority dan workflow. |
 | Q-RBAC-013 | Mapping role-permission diubah melalui konfigurasi/seed version-controlled yang direview, disetujui, lalu di-deploy; tidak ada UI grant management; katalog role/permission read-only. | Siapa yang boleh membaca katalog dan kontrak API-nya **PENDING**. Kontrol governance, API, dan tes **NOT IMPLEMENTED / NOT TESTED**. |
 
@@ -51,11 +55,13 @@ Enam aksi: Read, Create, Update, Delete/deactivate, Verify/approve, Export. Gran
 
 | Area | APPROVED | PENDING / NOT IMPLEMENTED / NOT TESTED |
 |---|---|---|
-| Mode identity | Intent self-hosted dan OIDC pada scope awal. | Provider/issuer/claims OIDC, linking, callback/protocol dan uniqueness subject masih PENDING; jangan membekukan schema identity eksternal. |
-| Self-hosted login | Akun wajib memiliki email dan username; login menerima salah satu; registrasi publik tidak ada. | Normalisasi, case-folding dan uniqueness detail PENDING; login runtime NOT IMPLEMENTED/NOT TESTED. |
+| Mode identity | Intent self-hosted dan OIDC; identitas OIDC dipasangkan oleh `(issuer, subject)` dan tidak auto-link berdasarkan email (keputusan scoped T4.7.4). | Provider/issuer allowlist, claims, linking flow, callback/protocol PENDING; runtime NOT IMPLEMENTED/NOT TESTED. |
+| Self-hosted login | Akun administrator wajib memiliki email dan username unik; keduanya trim+lowercase sebelum simpan; login menerima salah satu; registrasi publik tidak ada. | Credential verifier/password hashing parameters dan login runtime NOT IMPLEMENTED/NOT TESTED. |
+| User foundation | UUID, displayName opsional, passwordHash nullable, status ACTIVE/SUSPENDED/DISABLED, soft delete, created/updated timestamps. | Schema/migration development IMPLEMENTED; account API dan lifecycle enforcement NOT IMPLEMENTED/NOT TESTED. |
+| RBAC foundation | Relasi many-to-many User-Role dan Role-Permission; SUPER_ADMIN eksklusif; deny-by-default; mapping grant lewat reviewed config/seed, bukan UI. | Tabel/constraint development IMPLEMENTED; granular permission identifiers, seed dan authorization engine PENDING / NOT IMPLEMENTED / NOT TESTED. Q-RBAC-012 last-active-SUPER_ADMIN protection tetap terpisah dan belum diimplementasikan. |
 | Password dan token | NIST SP 800-63B-4 (2025) sebagai baseline; token setup/reset sekali pakai, random kuat, simpan hash, tolak token kedaluwarsa/terpakai, jangan log nilai mentah. | Policy owner/applicability review, provider, expiry, initiator, dan implementasi PENDING/NOT TESTED. |
 | MFA | Wajib untuk semua role; platform passkeys dan security keys diterima. | Enrollment, fallback, lost-device verifier/procedure dan recovery PENDING; MFA NOT IMPLEMENTED/NOT TESTED. |
-| Session | Sesi non-persisten. | Absolute/idle TTL, max sessions, revoke events, cookie/origin/CORS/CSRF topology PENDING; session runtime NOT IMPLEMENTED/NOT TESTED. |
+| Session | Opaque token entropy minimal 256 bit; database menyimpan hash token yang unik; sesi PostgreSQL dengan idle 30 menit, absolute 8 jam, pencabutan individual maupun seluruh sesi user (keputusan scoped T4.7.4). | Tabel/constraint development IMPLEMENTED; token creation/hash algorithm, runtime idle refresh/revocation, max-session policy, cookie/origin/CORS/CSRF topology PENDING / NOT IMPLEMENTED / NOT TESTED. |
 | Rate limiting | Login dan password-reset adalah kebijakan terpisah. | Scope akun/IP, window, threshold, delay/lock/unlock PENDING; kontrol NOT IMPLEMENTED/NOT TESTED. |
 | Account recovery | Safeguard verifikasi independen dan audit untuk pemulihan Super Admin disetujui sebagai persyaratan. | Authority dan workflow Q-RBAC-012/Q-AUTH-003, juga email provider/expiry/inisiator AUTH-005, PENDING. Recovery BLOCKED sampai prasyarat owner disepakati. |
 
@@ -67,15 +73,15 @@ Approval di atas tidak mengesahkan klaim compliance, kesiapan produksi, atau pem
 |---|---|---|
 | DB-001 / OWN-012 | `content_key` harus unik secara global — APPROVED. | DDL dan interaksi dengan route locale/content lifecycle perlu rekonsiliasi; schema validation PENDING/NOT TESTED. Jangan memilih strategi locale sendiri. |
 | DB-002 / OWN-013 | Composite foreign key untuk invariant category/model — APPROVED. | Struktur key, booking snapshot, recategorization dan DDL PENDING/NOT TESTED. Jangan mengganti dengan service-only rule. |
-| External identity uniqueness / TD33-004 | Tidak ada constraint baru disetujui oleh audit. | Sumber database memakai `auth_provider_subject UNIQUE`, sedangkan kandidat T3.2 memakai pasangan `(auth_provider, auth_provider_subject)`. Semantik provider/issuer belum ditentukan; konflik tetap PENDING hingga keputusan dan review schema. |
+| External identity uniqueness / TD33-004 | Untuk fondasi admin yang diminta pada T4.7.4, `(issuer, subject)` unik. Keputusan scoped ini mengatasi ketidakpastian constraint pada fondasi identitas admin. | Mapping issuer/provider yang dikonfigurasi eksplisit dan protocol OIDC tetap PENDING. Keputusan ini tidak mengubah kebutuhan rekonsiliasi sumber data domain eksternal selain admin auth. |
 
-Prisma 7.x dan Prisma Migrate serta PostgreSQL 18 tetap menjadi pilihan APPROVED. Schema/migration produksi **NOT IMPLEMENTED**. T4.3.2 **PARTIALLY COMPLETED**; fixture validation **PARTIALLY VALIDATED**, terbatas, sebagian hasil **REPORTED PASS** dan **NOT RE-RUN**.
+Prisma 7.x dan Prisma Migrate serta PostgreSQL 18 tetap menjadi pilihan APPROVED. Auth/RBAC schema dan migration `auth_identity_session_foundation` diterapkan ke development `anantalia_backend_dev`; ini bukan production schema. T4.3.2 tetap **PARTIALLY COMPLETED**; fixture validation **PARTIALLY VALIDATED**, sebagian hasil **REPORTED PASS** dan **NOT RE-RUN**.
 
 ## API target contract vs runtime
 
-- `/api/v1` dan route/payload pada API Specification adalah **PROPOSED / target contract**, bukan endpoint runtime. Tidak ada endpoint yang diimplementasikan.
+- `/api/v1` dan route/payload pada API Specification adalah **PROPOSED / target contract**, bukan endpoint runtime. Route runtime mencakup health, auth/session, admin account, dan My Profile yang didokumentasikan dalam OpenAPI runtime. Public/business endpoints belum diimplementasikan.
 - Konvensi umum menyebut prefix `/api/v1`, sedangkan beberapa tabel menulis path relatif `/admin/...`. Penormalan path dan kontrak setiap route masih **PENDING** sebelum freeze.
-- Public/Admin pipeline, server-side authorization, safe DTO, error mapping, validasi, pagination dan transaction boundaries adalah arah/requirement desain. Runtime dan tests **NOT IMPLEMENTED / NOT TESTED**.
+- Auth/Admin runtime memakai server-side session validation, permission checks, safe error responses, request validation, dan transaksi untuk operasi lifecycle yang terkait. Unit/HTTP tests tersedia; database-backed integration, complete request-schema validation, pagination hardening, dan seluruh business-domain boundaries masih **NOT TESTED / INCOMPLETE**.
 - OWN-009 menyetujui grant tingkat modul; ia tidak otomatis menyetujui permission identifier spesifik, seluruh payload/API, akses field, atau pembaca katalog role/permission.
 - Customer, pricing, finance, messages, analytics, content, settings, My Profile dan sejumlah kontrak Admin tetap parsial/kandidat. Jangan membuat asumsi endpoint atau business rule.
 
@@ -84,8 +90,14 @@ Prisma 7.x dan Prisma Migrate serta PostgreSQL 18 tetap menjadi pilihan APPROVED
 1. **OWN-003 repository state:** catatan T4.2/T4.3 bahwa repo belum dibuat/pembuatan belum diizinkan adalah historis dan superseded oleh keadaan repository saat ini (branch `main`, initial commit pushed). Tanggal/bukti otorisasi tidak tersedia dan tetap PENDING.
 2. **OWN-003 checklist:** Owner Confirmation Checklist §B mempertahankan status PENDING lama, berlawanan dengan keputusan OWN-003 yang kemudian lengkap di register dan §C. Status §B superseded untuk approval ownership.
 3. **RBAC foundation text:** backend-foundation lama menggolongkan role/permission seluruhnya sebagai pending. Itu superseded oleh approval OWN-009 dan batas akun terkait. Granular rules, runtime dan tests masih pending/tidak dilakukan.
-4. **Identity uniqueness:** TD33-004 masih unresolved; jangan memilih constraint sebelum provider/issuer semantics disepakati.
+4. **Identity uniqueness:** ketidakpastian TD33-004 superseded secara scoped untuk fondasi admin oleh keputusan T4.7.4 `(issuer, subject)` unik. Mapping provider/issuer dan setiap domain identity lain tetap pending.
 5. **DB-001/DB-002:** pilihan owner telah disetujui; sumber technical design lama yang menyebut pilihan tersebut unresolved superseded hanya untuk keputusan. DDL/schema validation tetap pending.
+
+## Bukti implementasi T4.7.4
+
+- Schema/migration auth foundation hanya diterapkan ke PostgreSQL development `anantalia_backend_dev`; migration status up to date, tanpa seed/data bisnis.
+- Prisma 7.10.1 validate/generate **PASS**; unit tests **16/16 PASS**; database integration tests **2/2 PASS** untuk health dan katalog schema.
+- Bukti katalog tidak menguji operasi tulis, behavior semua constraint, login, session runtime, OIDC, atau authorization end-to-end. Production readiness tidak dinyatakan.
 
 ## Referensi sumber
 

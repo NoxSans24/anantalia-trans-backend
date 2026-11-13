@@ -37,6 +37,9 @@ test('health reports application and database status with a timestamp', async ()
     assert.equal(body.checks.database, 'ok');
     assert.equal(Number.isNaN(Date.parse(body.timestamp)), false);
     assert.ok(response.headers.get('x-request-id'));
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('x-frame-options'), 'DENY');
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
   });
 });
 
@@ -84,10 +87,64 @@ test('JSON request body limit is enforced', async () => {
   });
 });
 
+test('array JSON bodies reach route validation as an empty object', async () => {
+  const authRouter = express.Router();
+  authRouter.post('/body', (req, res) => res.json({ body: req.body }));
+  const app = createApp({ authRouter, logger: createLogger(() => {}) });
+  await serve(app, async (base) => {
+    const response = await fetch(`${base}/auth/body`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '[]',
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { body: {} });
+  });
+});
+
 test('required environment is validated without disclosing values', () => {
   assert.throws(() => validateEnv({}), /DATABASE_URL is required/);
   assert.throws(() => validateEnv({ DATABASE_URL: 'mysql://host/db' }), /PostgreSQL database/);
   assert.deepEqual(validateEnv({ DATABASE_URL: databaseUrl }).port, 3000);
+  assert.equal(validateEnv({ DATABASE_URL: databaseUrl }).trustProxy, 'loopback');
+  assert.equal(validateEnv({ DATABASE_URL: databaseUrl, TRUST_PROXY: '1' }).trustProxy, 1);
+  assert.equal(validateEnv({ DATABASE_URL: databaseUrl, TRUST_PROXY: 'false' }).trustProxy, false);
+  assert.throws(() => validateEnv({ DATABASE_URL: databaseUrl, TRUST_PROXY: 'true' }), /TRUST_PROXY must not be true/);
+  assert.throws(() => validateEnv({ DATABASE_URL: databaseUrl, TRUST_PROXY: 'not-an-ip' }), /TRUST_PROXY/);
+});
+
+test('trust proxy resolves forwarded client IP and protocol only from trusted proxies', async () => {
+  const seen = [];
+  const authRouter = express.Router();
+  authRouter.get('/whoami', (req, res) => {
+    seen.push({ ip: req.ip, secure: req.secure, protocol: req.protocol });
+    res.json({ ip: req.ip, secure: req.secure });
+  });
+  const app = createApp({ authRouter, logger: createLogger(() => {}) });
+  await serve(app, async (base) => {
+    const response = await fetch(`${base}/auth/whoami`, {
+      headers: {
+        'x-forwarded-for': '203.0.113.45',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.ip, '203.0.113.45');
+    assert.equal(body.secure, true);
+  });
+
+  const untrustedApp = createApp({ authRouter, logger: createLogger(() => {}), trustProxy: false });
+  await serve(untrustedApp, async (base) => {
+    const response = await fetch(`${base}/auth/whoami`, {
+      headers: {
+        'x-forwarded-for': '203.0.113.45',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.notEqual(body.ip, '203.0.113.45');
+    assert.equal(body.secure, false);
+  });
 });
 
 test('Prisma initializes with a PostgreSQL adapter and requires a URL', async () => {

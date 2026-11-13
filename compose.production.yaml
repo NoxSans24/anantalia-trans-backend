@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the private db service}
+      CSRF_SECRET: ${CSRF_SECRET:?Set persistent CSRF_SECRET}
+      TOTP_ACTIVE_KEY_ID: ${TOTP_ACTIVE_KEY_ID:?Set TOTP_ACTIVE_KEY_ID}
+      TOTP_KEYRING: ${TOTP_KEYRING:?Set TOTP_KEYRING}
+      ARGON2_MEMORY_COST: ${ARGON2_MEMORY_COST:?Set reviewed Argon2id memory cost}
+      ARGON2_TIME_COST: ${ARGON2_TIME_COST:?Set reviewed Argon2id time cost}
+      ARGON2_PARALLELISM: ${ARGON2_PARALLELISM:?Set reviewed Argon2id parallelism}
+      ARGON2_HASH_LENGTH: ${ARGON2_HASH_LENGTH:?Set reviewed Argon2id hash length}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${HTTP_BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-3000}:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  migrate:
+    build:
+      context: .
+      target: build
+    profiles: ["migration"]
+    command: ["node", "node_modules/prisma/build/index.js", "migrate", "deploy"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to the private db service}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

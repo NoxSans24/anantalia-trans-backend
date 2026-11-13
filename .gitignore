@@ -50,3 +50,5 @@ db/backups/*.sql
 .DS_Store
 Thumbs.db
 Desktop.ini
+test-output.txt
+.codex/

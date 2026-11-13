@@ -1,0 +1,1144 @@
+openapi: 3.1.0
+info:
+  title: Anantalia Trans Backend — implemented endpoints
+  version: 0.1.0
+  description: >-
+    This document describes routes currently mounted by the backend across
+    public catalog, public booking requests, authentication/MFA, profile,
+    fleet management, dashboard summary, and operational admin modules
+    (bookings, customers, pricing, finance, inbox messages, content, analytics,
+    and system settings). Operational business modules are wired with
+    Prisma/PostgreSQL repositories via dependency injection.
+paths:
+  /api/v1/public/rental-types:
+    get:
+      summary: List rental types backed by at least one verified public model
+      responses:
+        '200': { description: Publicly selectable rental types }
+        '500': { description: Catalog storage is unavailable }
+  /api/v1/public/vehicle-categories:
+    get:
+      summary: List active categories with verified models for a rental type
+      parameters:
+        - in: query
+          name: rentalType
+          required: true
+          schema: { type: string, enum: [self_drive, with_driver] }
+      responses:
+        '200': { description: Public category allowlist }
+        '400': { description: Invalid rental type }
+  /api/v1/public/vehicle-models:
+    get:
+      summary: List verified models for a category and rental type
+      parameters:
+        - in: query
+          name: categoryId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: rentalType
+          required: true
+          schema: { type: string, enum: [self_drive, with_driver] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200': { description: Public model allowlist; excludes units, prices, and availability }
+        '400': { description: Invalid query }
+  /api/v1/admin/vehicle-categories:
+    get:
+      summary: Search and page vehicle categories
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: q, schema: { type: string, maxLength: 100 } }
+        - { in: query, name: includeInactive, schema: { type: boolean, default: false } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated categories; requires FLEET_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+    post:
+      summary: Create a vehicle category
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              properties:
+                slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 100 }
+                name: { type: string, minLength: 1, maxLength: 150 }
+                description: { type: [string, 'null'], maxLength: 2000 }
+                sortOrder: { type: integer, minimum: -100000, maximum: 100000 }
+      responses:
+        '201': { description: Category created; requires FLEET_CREATE }
+        '400': { description: Invalid category }
+        '409': { description: Slug already exists }
+  /api/v1/admin/vehicle-categories/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Read one vehicle category
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Category details }
+        '404': { description: Category not found }
+    patch:
+      summary: Update an allowlisted category field
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                slug: { type: string, maxLength: 100 }
+                name: { type: string, minLength: 1, maxLength: 150 }
+                description: { type: [string, 'null'], maxLength: 2000 }
+                sortOrder: { type: integer }
+                isActive: { type: boolean }
+      responses:
+        '200': { description: Category updated; requires FLEET_UPDATE }
+        '409': { description: Slug already exists }
+    delete:
+      summary: Soft-deactivate a category
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '204': { description: Category deactivated; requires FLEET_DELETE }
+  /api/v1/admin/vehicle-models:
+    get:
+      summary: Search and page vehicle models with category and rental options
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: q, schema: { type: string, maxLength: 100 } }
+        - { in: query, name: categoryId, schema: { type: string, format: uuid } }
+        - { in: query, name: isActive, schema: { type: boolean } }
+        - { in: query, name: isVerified, schema: { type: boolean } }
+        - { in: query, name: includeInactive, schema: { type: boolean, default: false } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated model catalog; requires FLEET_VIEW }
+    post:
+      summary: Create a model with both rental options disabled and verification off
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [categoryId, slug, name]
+              properties:
+                categoryId: { type: string, format: uuid }
+                slug: { type: string, maxLength: 100 }
+                name: { type: string, minLength: 1, maxLength: 150 }
+                description: { type: [string, 'null'], maxLength: 2000 }
+                seatCount: { type: [integer, 'null'], minimum: 1, maximum: 200 }
+                publicSpecs: { type: [object, 'null'] }
+      responses:
+        '201': { description: Model created; requires FLEET_CREATE }
+        '400': { description: Invalid model }
+        '404': { description: Active category not found }
+        '409': { description: Slug already exists }
+  /api/v1/admin/vehicle-models/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Read a model, category, and its rental options
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Model details; requires FLEET_VIEW }
+        '404': { description: Model not found }
+    patch:
+      summary: Update model fields; verification additionally requires FLEET_APPROVE
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                categoryId: { type: string, format: uuid }
+                slug: { type: string, maxLength: 100 }
+                name: { type: string, minLength: 1, maxLength: 150 }
+                description: { type: [string, 'null'], maxLength: 2000 }
+                seatCount: { type: [integer, 'null'], minimum: 1, maximum: 200 }
+                publicSpecs: { type: [object, 'null'] }
+                isActive: { type: boolean }
+                isVerified: { type: boolean }
+      responses:
+        '200': { description: Model updated }
+        '403': { description: Required permission is missing }
+        '409': { description: Slug already exists }
+    delete:
+      summary: Soft-deactivate a model
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '204': { description: Model deactivated; requires FLEET_DELETE }
+  /api/v1/admin/vehicle-models/{id}/rental-options:
+    get:
+      summary: List the supported rental options for a model
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Rental options; requires FLEET_VIEW }
+        '404': { description: Model not found }
+  /api/v1/admin/vehicle-models/{id}/rental-options/{rentalType}:
+    put:
+      summary: Enable or disable a supported rental option
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+        - { in: path, name: rentalType, required: true, schema: { type: string, enum: [self_drive, with_driver] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [isEnabled], properties: { isEnabled: { type: boolean } } }
+      responses:
+        '200': { description: Option updated; enabling requires FLEET_APPROVE, disabling requires FLEET_UPDATE }
+        '400': { description: Invalid rental type or body }
+        '404': { description: Active model not found }
+  /health:
+    get:
+      summary: Check application and database health
+      responses:
+        '200':
+          description: Application and database are available
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, timestamp, checks]
+                properties:
+                  status: { type: string, const: ok }
+                  timestamp: { type: string, format: date-time }
+                  checks:
+                    type: object
+                    required: [database]
+                    properties:
+                      database: { type: string, const: ok }
+              example:
+                status: ok
+                timestamp: '2026-11-05T12:00:00.000Z'
+                checks: { database: ok }
+        '503':
+          description: Database health query failed
+  /auth/csrf:
+    get:
+      summary: Issue or refresh the anonymous CSRF cookie
+      responses:
+        '200':
+          description: CSRF token is returned in the body and response header
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [csrfToken]
+                properties:
+                  csrfToken: { type: string }
+  /auth/login:
+    post:
+      summary: Verify local credentials and begin mandatory MFA
+      description: Supply exactly one of email or username. Send the CSRF token in the request body.
+      security: [{ csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, csrfToken]
+              properties:
+                email: { type: string, format: email }
+                username: { type: string }
+                password: { type: string, format: password, writeOnly: true }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Credentials verified; MFA challenge issued }
+        '400': { description: Invalid request }
+        '401': { description: Invalid credentials }
+        '403': { description: CSRF validation failed }
+        '429': { description: Login rate limit reached }
+        '500': { description: Internal error }
+  /auth/mfa/verify:
+    post:
+      summary: Verify a TOTP code and establish an admin session
+      security: [{ csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challenge, code, csrfToken]
+              properties:
+                challenge: { type: string, writeOnly: true }
+                code: { type: string, pattern: '^\d{6}$', writeOnly: true }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Authentication succeeded; session and CSRF cookies are set }
+        '400': { description: Invalid request }
+        '401': { description: MFA verification failed }
+        '403': { description: CSRF validation failed }
+        '429': { description: MFA rate limit reached }
+        '500': { description: Internal error }
+  /auth/session:
+    get:
+      summary: Validate the current admin session
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Session is valid }
+        '401': { description: Session is invalid or expired }
+        '500': { description: Internal error }
+  /auth/me:
+    get:
+      summary: Read the authenticated account and granted permissions
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Current active account
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, expiresAt]
+                properties:
+                  user:
+                    type: object
+                    required: [id, email, username, roles, permissions]
+                    properties:
+                      id: { type: string, format: uuid }
+                      email: { type: string, format: email }
+                      username: { type: string }
+                      displayName: { type: [string, 'null'] }
+                      roles: { type: array, items: { type: string, enum: [SUPER_ADMIN, ADMIN, STAFF] } }
+                      permissions: { type: array, items: { type: string } }
+                  expiresAt: { type: string, format: date-time }
+        '401': { description: Session is invalid, expired, or account is inactive }
+        '500': { description: Internal error }
+  /auth/session/rotate:
+    post:
+      summary: Rotate the current session token
+      description: Send the session cookie and CSRF cookie; the request body must contain the CSRF token.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csrfToken]
+              properties:
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Session token rotated; replacement cookies are set }
+        '401': { description: Session is invalid or expired }
+        '403': { description: CSRF validation failed }
+        '500': { description: Internal error }
+  /auth/sessions/revoke-all:
+    post:
+      summary: Revoke all sessions belonging to the authenticated account
+      description: Revokes every current account session, including this session. Requires a valid CSRF token.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csrfToken]
+              properties:
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: All sessions revoked; caller must sign in again }
+        '401': { description: Authentication required }
+        '403': { description: CSRF validation failed }
+        '503': { description: Revocation unavailable }
+  /auth/logout:
+    post:
+      summary: Revoke the current session
+      security: [{ csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csrfToken]
+              properties:
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Logout completed }
+        '403': { description: CSRF validation failed }
+        '503': { description: Session could not be revoked }
+  /api/admin/create:
+    post:
+      summary: Create an ADMIN or STAFF account
+      description: Requires CSRF token in X-CSRF-Token or the request body.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, username, roles]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                username: { type: string, minLength: 3, maxLength: 64 }
+                displayName: { type: [string, 'null'], maxLength: 200 }
+                roles:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: { type: string, enum: [ADMIN, STAFF] }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '201':
+          description: Admin account created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, email, username]
+                properties:
+                  id: { type: string, format: uuid }
+                  email: { type: string, format: email }
+                  username: { type: string }
+              example:
+                id: 00000000-0000-4000-8000-000000000001
+                email: admin@example.invalid
+                username: example-admin
+        '400': { description: Invalid account or role input }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '409': { description: Account conflicts with existing data }
+  /api/admin/list:
+    get:
+      summary: List manageable admin accounts
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200': { description: Paginated account list }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+  /api/admin/{id}:
+    get:
+      summary: Read one manageable admin account
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Account details }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Account not found }
+  /api/admin/{id}/role:
+    post:
+      summary: Replace an ADMIN or STAFF account's manageable roles
+      description: Requires CSRF token in X-CSRF-Token or the request body.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: { type: string, enum: [ADMIN, STAFF] }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Roles replaced }
+        '400': { description: Invalid role input }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Account not found }
+        '409': { description: Account is not manageable }
+  /api/admin/{id}/suspend:
+    post:
+      summary: Suspend an ADMIN or STAFF account
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Account suspended }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Account not found }
+  /api/admin/{id}/disable:
+    post:
+      summary: Disable an ADMIN or STAFF account
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Account disabled }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Account not found }
+  /api/admin/{id}/reactivate:
+    post:
+      summary: Reactivate a suspended or disabled ADMIN or STAFF account
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Account reactivated }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Account not found }
+  /api/admin/{id}/delete:
+    post:
+      summary: Soft-delete an ADMIN or STAFF account
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Account soft-deleted }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Account not found }
+  /api/me:
+    get:
+      summary: Read the authenticated user's profile
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Profile details }
+        '401': { description: Authentication required }
+        '404': { description: Account not found }
+  /api/me/email:
+    post:
+      summary: Request a verified email change
+      description: Requires CSRF token in X-CSRF-Token or the request body. The verification flow is not implemented.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '401': { description: Authentication required }
+        '501': { description: Email verification flow is not implemented }
+  /api/me/username:
+    post:
+      summary: Change the authenticated user's username
+      description: Requires CSRF token in X-CSRF-Token or the request body.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string, minLength: 3 }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Username updated }
+        '400': { description: Invalid username }
+        '401': { description: Authentication required }
+        '409': { description: Username already in use }
+  /api/me/displayName:
+    post:
+      summary: Change the authenticated user's display name
+      description: Requires CSRF token in X-CSRF-Token or the request body.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: { type: [string, 'null'] }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Display name updated }
+        '400': { description: Invalid display name }
+        '401': { description: Authentication required }
+  /api/me/password:
+    post:
+      summary: Change the authenticated user's password
+      description: Requires CSRF token in X-CSRF-Token or the request body.
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oldPassword, newPassword]
+              properties:
+                oldPassword: { type: string, format: password, writeOnly: true }
+                newPassword: { type: string, format: password, writeOnly: true }
+                csrfToken: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Password updated }
+        '400': { description: Current or new password is invalid }
+        '401': { description: Authentication required }
+        '409': { description: Concurrent profile update conflict }
+  /api/v1/admin/dashboard/summary:
+    get:
+      summary: Read live fleet-catalog and booking counts for the admin dashboard
+      description: Requires an authenticated session and DASHBOARD_VIEW permission. Fleet catalog and booking status counts are database-backed via Prisma.
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Current category, model verification, public rental capability, and booking status counts }
+        '401': { description: Authentication required }
+        '403': { description: Dashboard permission required }
+        '500': { description: Summary could not be read }
+  /api/v1/public/booking-requests:
+    post:
+      summary: Submit a public booking request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerName, whatsappPhone, categoryId, modelId, rentalType, startsOn, endsOn, pickupLocation]
+              properties:
+                customerName: { type: string, minLength: 1, maxLength: 150 }
+                whatsappPhone: { type: string, pattern: '^\\+[1-9]\\d{6,14}$' }
+                categoryId: { type: string, minLength: 1 }
+                modelId: { type: string, minLength: 1 }
+                rentalType: { type: string, enum: [self_drive, with_driver] }
+                startsOn: { type: string, format: date }
+                endsOn: { type: string, format: date }
+                pickupLocation: { type: string, minLength: 3, maxLength: 500 }
+                additionalNotes: { type: [string, 'null'], maxLength: 2000 }
+      responses:
+        '201': { description: Booking request accepted with waiting_confirmation status and whatsapp.available=false }
+        '400': { description: Invalid input parameters }
+        '409': { description: Duplicate pending booking request }
+        '422': { description: Selection unavailable }
+  /api/v1/admin/bookings:
+    get:
+      summary: List bookings with filters
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated list of bookings }
+        '401': { description: Authentication required }
+        '403': { description: Requires BOOKING_VIEW }
+  /api/v1/admin/bookings/{id}:
+    get:
+      summary: Read one booking by ID
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Booking detail }
+        '401': { description: Authentication required }
+        '403': { description: Requires BOOKING_VIEW }
+        '404': { description: Booking not found }
+  /api/v1/admin/bookings/{id}/status:
+    patch:
+      summary: Update booking status transition
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [waiting_confirmation, under_verification, confirmed, rejected, cancelled, completed] }
+                reason: { type: [string, 'null'] }
+      responses:
+        '200': { description: Status updated }
+        '400': { description: Invalid status code }
+        '401': { description: Authentication required }
+        '403': { description: Requires BOOKING_APPROVE or BOOKING_UPDATE or valid CSRF }
+        '404': { description: Booking not found }
+        '409': { description: Invalid transition }
+  /api/v1/admin/customers:
+    get:
+      summary: List active customers
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated list of customers; requires CUSTOMER_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+    post:
+      summary: Create a customer record
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1 }
+                phone: { type: [string, 'null'] }
+                email: { type: [string, 'null'] }
+                notes: { type: [string, 'null'] }
+      responses:
+        '201': { description: Customer created; requires CUSTOMER_CREATE }
+        '400': { description: Invalid input }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+  /api/v1/admin/customers/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Read one customer by ID
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Customer detail; requires CUSTOMER_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Customer not found }
+    patch:
+      summary: Update allowlisted customer fields
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                phone: { type: [string, 'null'] }
+                email: { type: [string, 'null'] }
+                notes: { type: [string, 'null'] }
+      responses:
+        '200': { description: Customer updated; requires CUSTOMER_UPDATE }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Customer not found }
+    delete:
+      summary: Deactivate customer record
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '200': { description: Customer deactivated; requires CUSTOMER_DELETE }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Customer not found }
+  /api/v1/admin/pricing:
+    get:
+      summary: List pricing rules
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: modelId, schema: { type: string } }
+        - { in: query, name: rentalType, schema: { type: string, enum: [self_drive, with_driver] } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated list of pricing rules; requires PRICING_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+    post:
+      summary: Create a pricing rule
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [modelId, rentalType, baseRate]
+              properties:
+                modelId: { type: string }
+                rentalType: { type: string, enum: [self_drive, with_driver] }
+                baseRate: { type: number, minimum: 0 }
+                currency: { type: string, default: IDR }
+                billingUnit: { type: string, default: day }
+                notes: { type: [string, 'null'] }
+      responses:
+        '201': { description: Pricing rule created; requires PRICING_CREATE }
+        '400': { description: Invalid input }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+  /api/v1/admin/pricing/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Read one pricing rule by ID
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Pricing rule detail; requires PRICING_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Pricing rule not found }
+    patch:
+      summary: Update a pricing rule
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                baseRate: { type: number, minimum: 0 }
+                billingUnit: { type: string }
+                notes: { type: [string, 'null'] }
+                isActive: { type: boolean }
+      responses:
+        '200': { description: Pricing rule updated; requires PRICING_UPDATE }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Pricing rule not found }
+    delete:
+      summary: Delete a pricing rule
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '200': { description: Pricing rule deleted; requires PRICING_DELETE }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Pricing rule not found }
+  /api/v1/admin/finance:
+    get:
+      summary: List finance transactions
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: type, schema: { type: string, enum: [income, expense] } }
+        - { in: query, name: category, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated transactions; requires FINANCE_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+    post:
+      summary: Record a finance transaction
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, amount]
+              properties:
+                type: { type: string, enum: [income, expense] }
+                amount: { type: number, exclusiveMinimum: 0 }
+                category: { type: string }
+                description: { type: [string, 'null'] }
+                bookingId: { type: [string, 'null'] }
+                date: { type: string, format: date }
+      responses:
+        '201': { description: Transaction recorded; requires FINANCE_CREATE }
+        '400': { description: Invalid input }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+  /api/v1/admin/finance/summary:
+    get:
+      summary: Read finance revenue, expense, and net profit summary
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Finance summary; requires FINANCE_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+  /api/v1/admin/finance/{id}:
+    get:
+      summary: Read one finance transaction by ID
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Transaction detail; requires FINANCE_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Transaction not found }
+  /api/v1/admin/messages:
+    get:
+      summary: List inbox messages
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated messages; requires MESSAGE_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+  /api/v1/admin/messages/{id}:
+    get:
+      summary: Read one message by ID
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Message detail; requires MESSAGE_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Message not found }
+  /api/v1/admin/messages/{id}/status:
+    patch:
+      summary: Update message status
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [unread, read, archived, replied] }
+      responses:
+        '200': { description: Status updated; requires MESSAGE_UPDATE }
+        '400': { description: Invalid status }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Message not found }
+  /api/v1/admin/messages/{id}/notes:
+    post:
+      summary: Add an internal note to a message
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: { type: string, minLength: 1 }
+      responses:
+        '201': { description: Note added; requires MESSAGE_UPDATE }
+        '400': { description: Invalid note }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Message not found }
+  /api/v1/admin/content:
+    get:
+      summary: List website content items
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: section, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { in: query, name: offset, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Paginated content items; requires CONTENT_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+    post:
+      summary: Create a website content item
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1 }
+                slug: { type: [string, 'null'] }
+                contentKey: { type: [string, 'null'] }
+                body: { type: string }
+                section: { type: string }
+                status: { type: string, enum: [draft, published, archived] }
+      responses:
+        '201': { description: Content created; requires CONTENT_CREATE }
+        '400': { description: Invalid input }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+  /api/v1/admin/content/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Read one content item by ID
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Content item detail; requires CONTENT_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Content item not found }
+    patch:
+      summary: Update a content item
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                slug: { type: [string, 'null'] }
+                body: { type: string }
+                section: { type: string }
+                status: { type: string, enum: [draft, published, archived] }
+      responses:
+        '200': { description: Content updated; requires CONTENT_UPDATE }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Content item not found }
+    delete:
+      summary: Delete a content item
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '200': { description: Content deleted; requires CONTENT_DELETE }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+        '404': { description: Content item not found }
+  /api/v1/admin/analytics/overview:
+    get:
+      summary: Read analytics overview metrics
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: range, schema: { type: string, default: 30d } }
+      responses:
+        '200': { description: Analytics overview; requires ANALYTICS_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+  /api/v1/admin/analytics/export:
+    get:
+      summary: Export analytics report
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { in: query, name: format, schema: { type: string, default: json } }
+      responses:
+        '200': { description: Analytics export; requires ANALYTICS_EXPORT }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+  /api/v1/admin/settings:
+    get:
+      summary: Read allowlisted system settings
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: System settings; requires SETTINGS_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+  /api/v1/admin/settings/{key}:
+    parameters:
+      - { in: path, name: key, required: true, schema: { type: string, enum: [companyName, address, officePhone, businessHours, currency, defaultTimezone, supportEmail] } }
+    get:
+      summary: Read one system setting by allowlisted key
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: Setting value; requires SETTINGS_VIEW }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied }
+        '404': { description: Unallowlisted setting key }
+    patch:
+      summary: Update one allowlisted system setting
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: string }
+      responses:
+        '200': { description: Setting updated; requires SETTINGS_UPDATE }
+        '400': { description: Invalid key or value }
+        '401': { description: Authentication required }
+        '403': { description: Permission denied or CSRF validation failed }
+  /api/me/mfa/status:
+    get:
+      summary: Get MFA status of current authenticated user
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200': { description: MFA factor status }
+  /api/me/mfa/totp/enroll:
+    post:
+      summary: Start TOTP MFA enrollment
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '200': { description: Returns secret and provisioning URI }
+  /api/me/mfa/totp/confirm:
+    post:
+      summary: Confirm and activate TOTP factor
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '200': { description: Factor activated }
+  /api/me/mfa/totp/revoke:
+    post:
+      summary: Revoke TOTP factor
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '200': { description: Factor revoked }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __session
+    csrfCookie:
+      type: apiKey
+      in: cookie
+      name: __csrf
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
