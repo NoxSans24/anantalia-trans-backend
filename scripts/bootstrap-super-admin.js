@@ -101,7 +101,7 @@ export async function bootstrapSuperAdmin({
       email: newUser.email,
       username: newUser.username,
     };
-  });
+  }, { maxWait: 10_000, timeout: 30_000 });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

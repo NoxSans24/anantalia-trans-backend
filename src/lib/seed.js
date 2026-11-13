@@ -56,5 +56,5 @@ export async function seedRolesAndPermissions(prisma) {
       await tx.rolePermission.createMany({ data: desired });
     }
     return { roles: roleIds, permissions: permissionIds };
-  });
+  }, { maxWait: 10_000, timeout: 30_000 });
 }
