@@ -17,7 +17,7 @@ services:
       - key: CSRF_SECRET
         sync: false
       - key: TOTP_ACTIVE_KEY_ID
-        value: key-2026-01
+        value: local-dev-2026
       - key: TOTP_KEYRING
         sync: false
       - key: ARGON2_MEMORY_COST
