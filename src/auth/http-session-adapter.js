@@ -6,6 +6,7 @@ export function createHttpSessionAdapter({ sessionService, clock = () => new Dat
 
   const cookieName = '__session';
   const csrfCookieName = '__csrf';
+  const inFlightValidations = new Map();
   const cookieOptions = {
     httpOnly: true,
     sameSite: 'lax',
@@ -17,7 +18,16 @@ export function createHttpSessionAdapter({ sessionService, clock = () => new Dat
   async function validateFromCookie(req) {
     const token = req.cookies?.[cookieName];
     if (typeof token !== 'string' || token.length === 0) return null;
-    const result = await sessionService.validateSession(token);
+    let pending = inFlightValidations.get(token);
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => sessionService.validateSession(token))
+        .finally(() => {
+          inFlightValidations.delete(token);
+        });
+      inFlightValidations.set(token, pending);
+    }
+    const result = await pending;
     if (result.status !== 'SESSION_VALID') return null;
     return {
       sessionId: result.sessionId,

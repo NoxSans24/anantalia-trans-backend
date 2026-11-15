@@ -1,14 +1,24 @@
 export function createAuthorizationService({ prisma } = {}) {
   if (!prisma) throw new TypeError('Prisma client required');
+  const inFlightPermissions = new Map();
 
   async function getUserPermissions(userId) {
-    const roles = await prisma.userRole.findMany({
-      where: { userId },
-      include: { role: { include: { permissions: { include: { permission: true } } } } },
-    });
-    const permissions = new Set();
-    roles.forEach(ur => ur.role.permissions.forEach(rp => permissions.add(rp.permission.code)));
-    return permissions;
+    let pending = inFlightPermissions.get(userId);
+    if (!pending) {
+      pending = (async () => {
+        const roles = await prisma.userRole.findMany({
+          where: { userId },
+          include: { role: { include: { permissions: { include: { permission: true } } } } },
+        });
+        const permissions = new Set();
+        roles.forEach((ur) => ur.role.permissions.forEach((rp) => permissions.add(rp.permission.code)));
+        return permissions;
+      })().finally(() => {
+        inFlightPermissions.delete(userId);
+      });
+      inFlightPermissions.set(userId, pending);
+    }
+    return pending;
   }
 
   async function hasPermission(userId, requiredPermission) {
