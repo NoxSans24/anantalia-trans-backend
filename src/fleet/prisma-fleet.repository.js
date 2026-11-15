@@ -2,6 +2,7 @@ export function createPrismaFleetRepository(prisma) {
   if (!prisma) throw new TypeError('Prisma client required');
   return Object.freeze({
     transaction: (work) => prisma.$transaction((tx) => work(createPrismaFleetRepository(tx))),
+    activityLog: prisma.activityLog,
     category: {
       list: (where, take, skip) => prisma.vehicleCategory.findMany({ where, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], take, skip }),
       count: (where) => prisma.vehicleCategory.count({ where }),
