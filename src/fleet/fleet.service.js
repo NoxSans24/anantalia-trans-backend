@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 const rentalTypes = new Set(['self_drive', 'with_driver']);
 const unitStatuses = new Set(['available', 'in_use', 'maintenance', 'inactive']);
 const maintenanceStatuses = new Set(['scheduled', 'in_progress', 'completed', 'cancelled']);
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -13,10 +13,12 @@ function computeServiceState(nextServiceDate) {
   if (nextServiceDate < today) return 'overdue';
   const soonDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
   if (nextServiceDate <= soonDate) return 'due_soon';
-  return 'scheduled';
+  return 'ok';
 }
 
-function reject(status) { throw Object.freeze({ status }); }
+function reject(status, userMessage) {
+  throw Object.freeze(userMessage ? { status, userMessage } : { status });
+}
 function trim(value, max) { return typeof value === 'string' ? value.trim().slice(0, max) : ''; }
 function validateSlug(value) {
   const slug = trim(value, 100);
@@ -267,7 +269,11 @@ export function createFleetService({ repository, authorizationService, activityL
           ? { nextServiceDate: { lt: today } }
           : serviceDue === 'due_soon'
             ? { nextServiceDate: { gte: today, lte: soonDate } }
-            : {}),
+            : (serviceDue === 'ok' || serviceDue === 'scheduled')
+              ? { nextServiceDate: { gt: soonDate } }
+              : serviceDue === 'none'
+                ? { nextServiceDate: null }
+                : {}),
       };
 
       const [rows, total, allForSummary] = await Promise.all([
@@ -276,16 +282,22 @@ export function createFleetService({ repository, authorizationService, activityL
         repository.unit.list({}, 500, 0),
       ]);
       const items = rows.map((u) => ({ ...u, serviceAlert: computeServiceState(u.nextServiceDate) }));
+      const inUseCount = allForSummary.filter((u) => u.status === 'in_use').length;
+      const overdueCount = allForSummary.filter((u) => u.status !== 'inactive' && computeServiceState(u.nextServiceDate) === 'overdue').length;
+      const dueSoonCount = allForSummary.filter((u) => u.status !== 'inactive' && computeServiceState(u.nextServiceDate) === 'due_soon').length;
       const summary = {
         total: allForSummary.length,
+        totalUnits: allForSummary.length,
         available: allForSummary.filter((u) => u.status === 'available').length,
-        in_use: allForSummary.filter((u) => u.status === 'in_use').length,
+        in_use: inUseCount,
+        inUse: inUseCount,
         maintenance: allForSummary.filter((u) => u.status === 'maintenance').length,
         inactive: allForSummary.filter((u) => u.status === 'inactive').length,
-        overdue: allForSummary.filter((u) => u.status !== 'inactive' && computeServiceState(u.nextServiceDate) === 'overdue').length,
-        dueSoon: allForSummary.filter((u) => u.status !== 'inactive' && computeServiceState(u.nextServiceDate) === 'due_soon').length,
+        overdue: overdueCount,
+        dueSoon: dueSoonCount,
+        serviceDueOrOverdue: overdueCount + dueSoonCount,
       };
-      return { items, summary, page: { limit: safeLimit, offset: safeOffset, total } };
+      return { items, summary, total, page: { limit: safeLimit, offset: safeOffset, total } };
     }
 
     const units = await loadUnits();
@@ -293,19 +305,41 @@ export function createFleetService({ repository, authorizationService, activityL
       if (modelId && u.modelId !== modelId) return false;
       if (status && status !== 'all' && u.status !== status) return false;
       if (needle && !`${u.plateNumber || ''} ${u.notes || ''}`.toLowerCase().includes(needle.toLowerCase())) return false;
-      if (serviceDue && computeServiceState(u.nextServiceDate) !== serviceDue) return false;
+      if (serviceDue && serviceDue !== 'all') {
+        const alertState = computeServiceState(u.nextServiceDate);
+        if (serviceDue === 'scheduled') {
+          if (alertState !== 'ok' && alertState !== 'scheduled') return false;
+        } else if (alertState !== serviceDue) {
+          return false;
+        }
+      }
       return true;
     }).map((u) => ({ ...u, serviceAlert: computeServiceState(u.nextServiceDate) }));
+    const inUseCount = units.filter((u) => u.status === 'in_use').length;
+    const overdueCount = units.filter((u) => u.status !== 'inactive' && computeServiceState(u.nextServiceDate) === 'overdue').length;
+    const dueSoonCount = units.filter((u) => u.status !== 'inactive' && computeServiceState(u.nextServiceDate) === 'due_soon').length;
     return {
       items: filtered.slice(safeOffset, safeOffset + safeLimit),
-      summary: { total: units.length, available: units.filter((u) => u.status === 'available').length, in_use: units.filter((u) => u.status === 'in_use').length, maintenance: units.filter((u) => u.status === 'maintenance').length, inactive: units.filter((u) => u.status === 'inactive').length, overdue: 0, dueSoon: 0 },
+      summary: {
+        total: units.length,
+        totalUnits: units.length,
+        available: units.filter((u) => u.status === 'available').length,
+        in_use: inUseCount,
+        inUse: inUseCount,
+        maintenance: units.filter((u) => u.status === 'maintenance').length,
+        inactive: units.filter((u) => u.status === 'inactive').length,
+        overdue: overdueCount,
+        dueSoon: dueSoonCount,
+        serviceDueOrOverdue: overdueCount + dueSoonCount,
+      },
+      total: filtered.length,
       page: { limit: safeLimit, offset: safeOffset, total: filtered.length },
     };
   }
 
   async function getVehicleUnit({ actor, id } = {}) {
     await requirePermission(actor, 'FLEET_VIEW');
-    if (!uuidPattern.test(id ?? '')) reject('INVALID_INPUT');
+    if (!uuidPattern.test(id ?? '')) reject('INVALID_INPUT', 'ID unit armada tidak valid.');
     if (repository.unit) {
       const unit = await repository.unit.get(id);
       return unit ? { ...unit, serviceAlert: computeServiceState(unit.nextServiceDate) } : null;
@@ -317,32 +351,42 @@ export function createFleetService({ repository, authorizationService, activityL
 
   async function createVehicleUnit({ actor, input = {} } = {}) {
     await requirePermission(actor, 'FLEET_CREATE');
-    const modelId = trim(input.modelId, 64);
+    const maxYear = Math.max(2035, new Date().getFullYear() + 5);
+    const rawModelId = trim(input.modelId, 100);
     const plateNumber = trim(input.plateNumber, 24).toUpperCase().replace(/\s+/g, ' ');
-    const year = Number(input.year ?? new Date().getFullYear());
-    const status = input.status ?? 'available';
+    const year = input.year === undefined || input.year === null || input.year === ''
+      ? new Date().getFullYear()
+      : Number(input.year);
+    const status = input.status || 'available';
     const odometerKm = input.odometerKm !== undefined && input.odometerKm !== null && input.odometerKm !== '' ? Number(input.odometerKm) : null;
     const nextServiceDate = input.nextServiceDate ? trim(input.nextServiceDate, 10) : null;
     const lastServiceDate = input.lastServiceDate ? trim(input.lastServiceDate, 10) : null;
     const notes = input.notes ? trim(input.notes, 500) : null;
 
-    if (!uuidPattern.test(modelId) || plateNumber.length < 3 || !Number.isSafeInteger(year) || year < 1990 || year > 2035 || !unitStatuses.has(status)) {
-      reject('INVALID_INPUT');
-    }
-    if (odometerKm !== null && (!Number.isSafeInteger(odometerKm) || odometerKm < 0)) reject('INVALID_INPUT');
+    if (!rawModelId) reject('INVALID_INPUT', 'Model armada wajib dipilih.');
+    if (plateNumber.length < 3) reject('INVALID_INPUT', 'Nomor polisi wajib diisi (minimal 3 karakter).');
+    if (!Number.isSafeInteger(year) || year < 1990 || year > maxYear) reject('INVALID_INPUT', `Tahun kendaraan wajib antara 1990 sampai ${maxYear}.`);
+    if (!unitStatuses.has(status)) reject('INVALID_INPUT', 'Status unit armada tidak valid.');
+    if (odometerKm !== null && (!Number.isSafeInteger(odometerKm) || odometerKm < 0)) reject('INVALID_INPUT', 'Odometer wajib berupa bilangan bulat tidak negatif.');
     if ((nextServiceDate && !isoDatePattern.test(nextServiceDate)) || (lastServiceDate && !isoDatePattern.test(lastServiceDate))) {
-      reject('INVALID_INPUT');
+      reject('INVALID_INPUT', 'Format tanggal servis harus YYYY-MM-DD.');
     }
 
     if (repository.unit) {
       return repository.transaction(async (tx) => {
-        const model = await tx.model.get(modelId);
-        if (!model) reject('MODEL_NOT_FOUND');
+        let model = uuidPattern.test(rawModelId)
+          ? await tx.model.get(rawModelId)
+          : (tx.model.findBySlug ? await tx.model.findBySlug(rawModelId) : null);
+        if (!model) {
+          if (!uuidPattern.test(rawModelId) && !tx.model.findBySlug) reject('INVALID_INPUT', 'Model armada tidak valid.');
+          reject('MODEL_NOT_FOUND', 'Model armada yang dipilih tidak ditemukan.');
+        }
+        const resolvedModelId = model.id;
         const dup = await tx.unit.findByPlate(plateNumber);
-        if (dup) reject('DUPLICATE_PLATE');
+        if (dup) reject('DUPLICATE_PLATE', `Nomor polisi ${plateNumber} sudah terdaftar pada unit lain.`);
         const item = await tx.unit.create({
           id: randomUUID(),
-          modelId,
+          modelId: resolvedModelId,
           plateNumber,
           year,
           status,
@@ -352,43 +396,46 @@ export function createFleetService({ repository, authorizationService, activityL
           notes,
           isActive: status !== 'inactive',
         });
-        await activityLog.log({ actor, action: 'FLEET_UNIT_CREATED', resourceType: 'VehicleUnit', resourceId: item.id, details: { modelId, plateNumber, status }, client: tx }).catch(() => {});
+        await activityLog.log({ actor, action: 'FLEET_UNIT_CREATED', resourceType: 'VehicleUnit', resourceId: item.id, details: { modelId: resolvedModelId, plateNumber, status }, client: tx }).catch(() => {});
         return { ...item, serviceAlert: computeServiceState(item.nextServiceDate) };
       });
     }
 
-    const model = await repository.model.get(modelId);
-    if (!model) reject('MODEL_NOT_FOUND');
+    if (!uuidPattern.test(rawModelId)) reject('INVALID_INPUT', 'Model armada tidak valid.');
+    const model = await repository.model.get(rawModelId);
+    if (!model) reject('MODEL_NOT_FOUND', 'Model armada yang dipilih tidak ditemukan.');
     const units = await loadUnits();
-    if (units.some((u) => u.plateNumber.toUpperCase() === plateNumber)) reject('DUPLICATE_PLATE');
+    if (units.some((u) => u.plateNumber.toUpperCase() === plateNumber)) reject('DUPLICATE_PLATE', `Nomor polisi ${plateNumber} sudah terdaftar.`);
     const now = new Date().toISOString();
-    const item = { id: randomUUID(), modelId, plateNumber, year, status, odometerKm, lastServiceDate, nextServiceDate, notes, version: 1, isActive: status !== 'inactive', createdAt: now, updatedAt: now };
+    const item = { id: randomUUID(), modelId: rawModelId, plateNumber, year, status, odometerKm, lastServiceDate, nextServiceDate, notes, version: 1, isActive: status !== 'inactive', createdAt: now, updatedAt: now };
     await saveUnits([item, ...units]);
-    await activityLog.log({ actor, action: 'FLEET_UNIT_CREATED', resourceType: 'VehicleUnit', resourceId: item.id, details: { modelId, plateNumber, status } }).catch(() => {});
+    await activityLog.log({ actor, action: 'FLEET_UNIT_CREATED', resourceType: 'VehicleUnit', resourceId: item.id, details: { modelId: rawModelId, plateNumber, status } }).catch(() => {});
     return item;
   }
 
   async function updateVehicleUnit({ actor, id, input = {} } = {}) {
     await requirePermission(actor, 'FLEET_UPDATE');
+    const maxYear = Math.max(2035, new Date().getFullYear() + 5);
     if (repository.unit) {
       return repository.transaction(async (tx) => {
         const current = await tx.unit.get(id);
         if (!current) reject('UNIT_NOT_FOUND');
         const plateNumber = input.plateNumber !== undefined ? trim(input.plateNumber, 24).toUpperCase().replace(/\s+/g, ' ') : current.plateNumber;
-        const year = input.year !== undefined ? Number(input.year) : current.year;
+        const year = input.year !== undefined ? (input.year === '' || input.year === null ? current.year : Number(input.year)) : current.year;
         const status = input.status !== undefined ? input.status : current.status;
         const odometerKm = input.odometerKm !== undefined ? (input.odometerKm === null || input.odometerKm === '' ? null : Number(input.odometerKm)) : current.odometerKm;
         const nextServiceDate = input.nextServiceDate !== undefined ? (input.nextServiceDate ? trim(input.nextServiceDate, 10) : null) : current.nextServiceDate;
         const lastServiceDate = input.lastServiceDate !== undefined ? (input.lastServiceDate ? trim(input.lastServiceDate, 10) : null) : current.lastServiceDate;
         const notes = input.notes !== undefined ? (input.notes ? trim(input.notes, 500) : null) : current.notes;
 
-        if (plateNumber.length < 3 || !Number.isSafeInteger(year) || year < 1990 || year > 2035 || !unitStatuses.has(status)) reject('INVALID_INPUT');
-        if (odometerKm !== null && (!Number.isSafeInteger(odometerKm) || odometerKm < 0)) reject('INVALID_INPUT');
-        if ((nextServiceDate && !isoDatePattern.test(nextServiceDate)) || (lastServiceDate && !isoDatePattern.test(lastServiceDate))) reject('INVALID_INPUT');
+        if (plateNumber.length < 3) reject('INVALID_INPUT', 'Nomor polisi wajib diisi (minimal 3 karakter).');
+        if (!Number.isSafeInteger(year) || year < 1990 || year > maxYear || !unitStatuses.has(status)) reject('INVALID_INPUT', `Tahun kendaraan harus antara 1990 dan ${maxYear}.`);
+        if (odometerKm !== null && (!Number.isSafeInteger(odometerKm) || odometerKm < 0)) reject('INVALID_INPUT', 'Odometer wajib berupa bilangan bulat tidak negatif.');
+        if ((nextServiceDate && !isoDatePattern.test(nextServiceDate)) || (lastServiceDate && !isoDatePattern.test(lastServiceDate))) reject('INVALID_INPUT', 'Format tanggal servis harus YYYY-MM-DD.');
 
         if (plateNumber !== current.plateNumber) {
           const dup = await tx.unit.findByPlate(plateNumber);
-          if (dup && dup.id !== id) reject('DUPLICATE_PLATE');
+          if (dup && dup.id !== id) reject('DUPLICATE_PLATE', `Nomor polisi ${plateNumber} sudah digunakan unit lain.`);
         }
 
         const expectedVersion = input.version !== undefined ? Number(input.version) : undefined;
@@ -413,7 +460,7 @@ export function createFleetService({ repository, authorizationService, activityL
     const nextServiceDate = input.nextServiceDate !== undefined ? (input.nextServiceDate ? trim(input.nextServiceDate, 10) : null) : current.nextServiceDate;
     const lastServiceDate = input.lastServiceDate !== undefined ? (input.lastServiceDate ? trim(input.lastServiceDate, 10) : null) : current.lastServiceDate;
     const notes = input.notes !== undefined ? (input.notes ? trim(input.notes, 500) : null) : current.notes;
-    if (plateNumber.length < 3 || !Number.isSafeInteger(year) || year < 1990 || year > 2035 || !unitStatuses.has(status)) reject('INVALID_INPUT');
+    if (plateNumber.length < 3 || !Number.isSafeInteger(year) || year < 1990 || year > maxYear || !unitStatuses.has(status)) reject('INVALID_INPUT');
     if ((nextServiceDate && !isoDatePattern.test(nextServiceDate)) || (lastServiceDate && !isoDatePattern.test(lastServiceDate))) reject('INVALID_INPUT');
     if (units.some((u) => u.id !== id && u.plateNumber.toUpperCase() === plateNumber)) reject('DUPLICATE_PLATE');
     const updated = { ...current, plateNumber, year, status, lastServiceDate, nextServiceDate, notes, updatedAt: new Date().toISOString() };

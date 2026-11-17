@@ -22,6 +22,20 @@ const VALID_CATEGORIES = [
   'other',
 ];
 
+const CATEGORY_ALIASES = Object.freeze({
+  pertanyaan: 'general',
+  pemesanan: 'booking',
+  harga: 'pricing',
+  keluhan: 'complaint',
+  kerjasama: 'partnership',
+});
+
+function normalizeCategory(raw) {
+  const key = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  const mapped = CATEGORY_ALIASES[key] || key;
+  return VALID_CATEGORIES.includes(mapped) ? mapped : 'general';
+}
+
 export function createInboxService({ repository, authorizationService, activityLog, settingsRepository } = {}) {
   const localMetaStore = new Map();
   let localTemplates = [];
@@ -122,7 +136,7 @@ export function createInboxService({ repository, authorizationService, activityL
 
       const id = randomUUID();
       const nowIso = new Date().toISOString();
-      const cleanCategory = VALID_CATEGORIES.includes(category) ? category : 'general';
+      const cleanCategory = normalizeCategory(category);
       const initialPriority = cleanCategory === 'complaint' ? 'high' : 'normal';
       const record = {
         id,

@@ -14,6 +14,7 @@ export function createPrismaFleetRepository(prisma) {
       list: (where, take, skip) => prisma.vehicleModel.findMany({ where, include: { category: true, rentalOptions: { orderBy: { rentalType: 'asc' } } }, orderBy: { name: 'asc' }, take, skip }),
       count: (where) => prisma.vehicleModel.count({ where }),
       get: (id) => prisma.vehicleModel.findUnique({ where: { id }, include: { category: true, rentalOptions: { orderBy: { rentalType: 'asc' } } } }),
+      findBySlug: (slug) => prisma.vehicleModel.findUnique({ where: { slug }, include: { category: true, rentalOptions: { orderBy: { rentalType: 'asc' } } } }),
       create: (data) => prisma.vehicleModel.create({ data, include: { category: true } }),
       update: (id, data) => prisma.vehicleModel.update({ where: { id }, data, include: { category: true, rentalOptions: { orderBy: { rentalType: 'asc' } } } }),
       createOptions: (modelId) => prisma.vehicleRentalOption.createMany({ data: ['self_drive', 'with_driver'].map((rentalType) => ({ modelId, rentalType, isEnabled: false })) }),

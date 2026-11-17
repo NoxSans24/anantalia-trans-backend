@@ -178,10 +178,27 @@ export function createSettingsService({ repository, authorizationService, activi
       if (resourceType && resourceType !== 'all') where.resourceType = resourceType;
       if (q && typeof q === 'string' && q.trim()) {
         const needle = q.trim();
+        const uuidExact = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(needle);
+        let matchedActorIds = [];
+        if (prisma.user?.findMany) {
+          const matchingUsers = await prisma.user.findMany({
+            where: {
+              OR: [
+                { username: { contains: needle, mode: 'insensitive' } },
+                { displayName: { contains: needle, mode: 'insensitive' } },
+                { email: { contains: needle, mode: 'insensitive' } },
+              ],
+            },
+            select: { id: true },
+            take: 50,
+          }).catch(() => []);
+          matchedActorIds = matchingUsers.map((u) => u.id).filter(Boolean);
+        }
         where.OR = [
           { action: { contains: needle, mode: 'insensitive' } },
           { resourceType: { contains: needle, mode: 'insensitive' } },
-          { actor: { contains: needle, mode: 'insensitive' } },
+          ...(uuidExact ? [{ actor: needle }] : []),
+          ...(matchedActorIds.length ? [{ actor: { in: matchedActorIds } }] : []),
         ];
       }
       const [rows, total] = await Promise.all([

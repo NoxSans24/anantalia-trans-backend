@@ -1,10 +1,13 @@
-const manageableRoles = new Set(['ADMIN', 'STAFF']);
+import { hashPassword } from './password-service.js';
 
-function rejected(status) {
-  return Object.freeze({ status });
+const manageableRoles = new Set(['ADMIN', 'STAFF']);
+const usernamePattern = /^[a-z0-9._-]{3,64}$/;
+
+function rejected(status, message) {
+  return message ? Object.freeze({ status, message }) : Object.freeze({ status });
 }
 
-export function createAdminAccountService({ prisma, authService, activityLog, accountLifecycleService } = {}) {
+export function createAdminAccountService({ prisma, authService, activityLog, accountLifecycleService, passwordService } = {}) {
   if (!prisma || !authService || !activityLog || !accountLifecycleService) throw new TypeError('All admin account dependencies are required');
 
   function validRoles(roles) {
@@ -22,35 +25,51 @@ export function createAdminAccountService({ prisma, authService, activityLog, ac
     if (!await authService.canManageUser(actor, targetUserId)) throw rejected('PERMISSION_DENIED');
   }
 
-  async function createAdmin({ actor, email, username, displayName, roles }) {
+  async function createAdmin({ actor, email, username, displayName, roles, password }) {
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const normalizedUsername = typeof username === 'string' ? username.trim().toLowerCase() : '';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 254) throw rejected('INVALID_ACCOUNT');
-    if (normalizedUsername.length < 3 || normalizedUsername.length > 64) throw rejected('INVALID_ACCOUNT');
-    if (!validRoles(roles)) throw rejected('INVALID_ROLE');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 254) {
+      throw rejected('INVALID_ACCOUNT', 'Format email tidak valid.');
+    }
+    if (!usernamePattern.test(normalizedUsername)) {
+      throw rejected('INVALID_ACCOUNT', 'Username wajib 3–64 karakter (huruf kecil, angka, titik, garis bawah, atau tanda hubung).');
+    }
+    if (!validRoles(roles)) throw rejected('INVALID_ROLE', 'Peran yang dipilih tidak diizinkan.');
+
+    let encodedPasswordHash = null;
+    if (password !== undefined) {
+      if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+        throw rejected('INVALID_PASSWORD', 'Kata sandi wajib diisi minimal 8 karakter (maksimal 128 karakter).');
+      }
+      encodedPasswordHash = passwordService?.hash
+        ? await passwordService.hash(password)
+        : await hashPassword(password);
+    }
+
     await requireManager(actor, 'USER_CREATE');
 
     try {
       return await prisma.$transaction(async (tx) => {
         const existing = await tx.user.findFirst({ where: { OR: [{ email: normalizedEmail }, { username: normalizedUsername }] }, select: { id: true } });
-        if (existing) throw rejected('ACCOUNT_CONFLICT');
+        if (existing) throw rejected('ACCOUNT_CONFLICT', 'Email atau username sudah terdaftar pada akun lain.');
         const roleRows = await tx.role.findMany({ where: { code: { in: roles } }, select: { id: true } });
-        if (roleRows.length !== roles.length) throw rejected('INVALID_ROLE');
+        if (roleRows.length !== roles.length) throw rejected('INVALID_ROLE', 'Peran yang dipilih tidak ditemukan.');
         const user = await tx.user.create({
           data: {
             email: normalizedEmail,
             username: normalizedUsername,
             displayName: typeof displayName === 'string' && displayName.trim() ? displayName.trim() : null,
+            ...(encodedPasswordHash ? { passwordHash: encodedPasswordHash } : {}),
             status: 'ACTIVE',
           },
-          select: { id: true, email: true, username: true },
+          select: { id: true, email: true, username: true, displayName: true },
         });
         await tx.userRole.createMany({ data: roleRows.map(({ id: roleId }) => ({ userId: user.id, roleId })) });
         await activityLog.log({ actor, action: 'USER_CREATED', resourceType: 'User', resourceId: user.id, targetUserId: user.id, details: { roles }, client: tx });
         return { ...user, roles: roles.map((code) => ({ role: { code } })) };
       });
     } catch (error) {
-      if (error?.code === 'P2002') throw rejected('ACCOUNT_CONFLICT');
+      if (error?.code === 'P2002') throw rejected('ACCOUNT_CONFLICT', 'Email atau username sudah terdaftar pada akun lain.');
       throw error;
     }
   }

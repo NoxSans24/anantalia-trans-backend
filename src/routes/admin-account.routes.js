@@ -15,26 +15,53 @@ export function createAdminAccountRouter({ adminAccountService, authService, act
   }
 
   function validAccountId(value) {
-    return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+    return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
   }
+
+  const DEFAULT_ERROR_MESSAGES = {
+    PERMISSION_DENIED: 'Anda tidak memiliki izin untuk mengelola akun ini.',
+    ACCOUNT_NOT_MANAGEABLE: 'Akun ini tidak dapat dikelola dari modul ini.',
+    ACCOUNT_NOT_FOUND: 'Akun administrator tidak ditemukan.',
+    ACCOUNT_CONFLICT: 'Email atau username sudah terdaftar pada akun lain.',
+    LAST_SUPER_ADMIN_PROTECTED: 'Super Admin aktif terakhir tidak dapat dinonaktifkan atau dihapus.',
+    INVALID_ACCOUNT: 'Data email atau username tidak valid (username minimal 3 karakter).',
+    INVALID_ROLE: 'Peran yang dipilih tidak valid.',
+    INVALID_PASSWORD: 'Kata sandi wajib diisi antara 8 hingga 128 karakter.',
+    INTERNAL_ERROR: 'Terjadi kesalahan internal saat memproses permintaan.',
+  };
 
   function sendError(res, error) {
     const code = error?.status ?? 'INTERNAL_ERROR';
     const status = code === 'PERMISSION_DENIED' || code === 'ACCOUNT_NOT_MANAGEABLE' ? 403
       : code === 'ACCOUNT_NOT_FOUND' ? 404
         : code === 'ACCOUNT_CONFLICT' || code === 'LAST_SUPER_ADMIN_PROTECTED' ? 409
-          : code === 'INVALID_ACCOUNT' || code === 'INVALID_ROLE' ? 400 : 500;
-    return res.status(status).json({ error: { code } });
+          : code === 'INVALID_ACCOUNT' || code === 'INVALID_ROLE' || code === 'INVALID_PASSWORD' ? 400 : 500;
+    const message = error?.message && status !== 500 ? error.message : (DEFAULT_ERROR_MESSAGES[code] || DEFAULT_ERROR_MESSAGES.INTERNAL_ERROR);
+    return res.status(status).json({ error: { code, message } });
   }
 
   router.post('/admin/create', async (req, res) => {
     try {
-      const { email, username, displayName, roles } = req.body;
+      const { email, username, displayName, roles, password } = req.body ?? {};
       const userId = req.userId;
-      if (!userId) return res.status(401).json({ error: { code: 'UNAUTHENTICATED' } });
+      if (!userId) return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Sesi login tidak valid.' } });
+      if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+        return res.status(400).json({
+          error: {
+            code: 'INVALID_PASSWORD',
+            message: 'Kata sandi wajib diisi (8–128 karakter).',
+          },
+        });
+      }
 
-      const result = await adminAccountService.createAdmin({ actor: userId, email, username, displayName, roles });
-      return res.status(201).json({ id: result.id, email: result.email, username: result.username });
+      const result = await adminAccountService.createAdmin({ actor: userId, email, username, displayName, roles, password });
+      return res.status(201).json({
+        id: result.id,
+        email: result.email,
+        username: result.username,
+        displayName: result.displayName ?? null,
+        roles: Array.isArray(result.roles) ? result.roles.map((r) => r.role?.code || r) : [],
+      });
     } catch (error) {
       logger?.error?.('admin_create_failed', { requestId: req.id });
       return sendError(res, error);
@@ -47,7 +74,6 @@ export function createAdminAccountRouter({ adminAccountService, authService, act
       if (!userId) return res.status(401).json({ error: { code: 'UNAUTHENTICATED' } });
 
       await authService.requirePermission(userId, 'USER_VIEW');
-      if (!await authService.canManageUser(userId, null)) return res.status(403).json({ error: { code: 'FORBIDDEN' } });
       const limit = paginationNumber(req.query.limit, 50, 1, 100);
       const offset = paginationNumber(req.query.offset, 0, 0);
       if (limit === null || offset === null) return res.status(400).json({ error: { code: 'INVALID_PAGINATION' } });
@@ -67,7 +93,6 @@ export function createAdminAccountRouter({ adminAccountService, authService, act
       if (!validAccountId(req.params.id)) return res.status(400).json({ error: { code: 'INVALID_ID' } });
 
       await authService.requirePermission(userId, 'USER_VIEW');
-      if (!await authService.canManageUser(userId, req.params.id)) return res.status(403).json({ error: { code: 'FORBIDDEN' } });
       const profile = await adminAccountService.getAdminProfile(req.params.id);
       if (!profile) return res.status(404).json({ error: { code: 'NOT_FOUND' } });
 

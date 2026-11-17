@@ -169,7 +169,7 @@ if (totpFactorService && csrfMiddleware && passwordConfigurationValid) {
 
   authenticationMiddleware = createAuthenticationMiddleware({ sessionAdapter });
 
-  const adminAccountService = createAdminAccountService({ prisma, authService, activityLog, accountLifecycleService });
+  const adminAccountService = createAdminAccountService({ prisma, authService, activityLog, accountLifecycleService, passwordService: { hash: hashPassword } });
   adminAccountRouter = createAdminAccountRouter({ adminAccountService, authService, activityLog, logger });
 
   const myProfileService = createMyProfileService({ prisma, passwordService: { hash: hashPassword }, activityLog, totpFactorService, settingsRepository });

@@ -120,7 +120,15 @@ export function createFinanceService({ repository, authorizationService, activit
         status: 'void',
         description: updatedDescription,
       });
-      if (activityLog?.record) {
+      if (activityLog?.log) {
+        await activityLog.log({
+          actor: userId,
+          action: 'FINANCE_TRANSACTION_VOIDED',
+          resourceType: 'FinanceTransaction',
+          resourceId: id,
+          details: { previousStatus: existing.status, reason: cleanReason || null },
+        }).catch(() => {});
+      } else if (activityLog?.record) {
         await activityLog.record({
           userId,
           action: 'FINANCE_TRANSACTION_VOIDED',

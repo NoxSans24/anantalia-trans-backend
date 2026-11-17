@@ -15,6 +15,15 @@ export function createInMemorySettingsRepository(initialData = {}) {
       return value;
     },
 
+    async getSetting(key) {
+      return store.has(key) ? { key, value: store.get(key) } : null;
+    },
+
+    async upsertSetting(key, value) {
+      store.set(key, value);
+      return { key, value };
+    },
+
     clear() {
       store.clear();
     },

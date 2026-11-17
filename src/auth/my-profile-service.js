@@ -41,16 +41,20 @@ function parseJsonSetting(raw, fallback) {
 function validateAvatarDataUrl(value) {
   if (value === null || value === '') return null;
   if (typeof value !== 'string') throw rejected('INVALID_PROFILE_VALUE');
-  const match = value.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+  const trimmed = value.trim();
+  const match = trimmed.match(/^data:image\/(png|jpeg|jpg|webp);base64,([\s\S]+)$/i);
   if (!match) throw rejected('INVALID_PROFILE_VALUE');
-  const format = match[1];
-  const bytes = Buffer.from(match[2], 'base64');
+  const rawFormat = match[1].toLowerCase();
+  const format = rawFormat === 'jpg' ? 'jpeg' : rawFormat;
+  const cleanBase64 = match[2].replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/=]+$/.test(cleanBase64)) throw rejected('INVALID_PROFILE_VALUE');
+  const bytes = Buffer.from(cleanBase64, 'base64');
   if (bytes.length === 0 || bytes.length > 262144) throw rejected('INVALID_PROFILE_VALUE');
   const isPng = format === 'png' && bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
   const isJpeg = format === 'jpeg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   const isWebp = format === 'webp' && bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
   if (!isPng && !isJpeg && !isWebp) throw rejected('INVALID_PROFILE_VALUE');
-  return value;
+  return `data:image/${format};base64,${cleanBase64}`;
 }
 
 function normalizePhone(phone) {
@@ -164,13 +168,15 @@ export function createMyProfileService({ prisma, passwordService, activityLog, t
 
   async function updateIdentifier(userId, value, field, action) {
     const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (normalized.length < 3) throw rejected('INVALID_PROFILE_VALUE');
+    if (normalized.length < 3 || normalized.length > 64) throw rejected('INVALID_PROFILE_VALUE');
     try {
-      return await prisma.$transaction(async (tx) => {
-        const updated = await tx.user.update({ where: { id: userId }, data: { [field]: normalized } });
+      const updated = await prisma.$transaction(async (tx) => {
+        const row = await tx.user.update({ where: { id: userId }, data: { [field]: normalized } });
         await activityLog.log({ actor: userId, action, resourceType: 'User', resourceId: userId, targetUserId: userId, client: tx });
-        return safeUser(updated);
+        return row;
       });
+      const meta = await readUserMeta(userId);
+      return safeUser(updated, meta);
     } catch (error) {
       if (error?.code === 'P2002') throw rejected('PROFILE_VALUE_IN_USE');
       throw error;
@@ -183,24 +189,32 @@ export function createMyProfileService({ prisma, passwordService, activityLog, t
 
   async function updateDisplayName(userId, displayName) {
     if (displayName !== null && typeof displayName !== 'string') throw rejected('INVALID_PROFILE_VALUE');
-    return prisma.$transaction(async (tx) => {
-      const updated = await tx.user.update({
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.user.update({
         where: { id: userId },
         data: { displayName: typeof displayName === 'string' && displayName.trim() ? displayName.trim() : null },
       });
       await activityLog.log({ actor: userId, action: 'PROFILE_DISPLAY_NAME_UPDATED', resourceType: 'User', resourceId: userId, targetUserId: userId, client: tx });
-      return safeUser(updated);
+      return row;
     });
+    const meta = await readUserMeta(userId);
+    return safeUser(updated, meta);
   }
 
   async function changePassword(userId, oldPassword, newPassword, verifyPassword) {
     if (typeof verifyPassword !== 'function') throw new TypeError('Password verifier is required');
-    if (typeof oldPassword !== 'string' || oldPassword.length === 0 || typeof newPassword !== 'string' || newPassword.length === 0) {
+    if (typeof newPassword !== 'string' || newPassword.length === 0) {
       throw rejected('INVALID_PROFILE_VALUE');
     }
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, passwordHash: true } });
-    if (!user?.passwordHash) throw rejected('ACCOUNT_NOT_FOUND');
-    if (!await verifyPassword(oldPassword, user.passwordHash)) throw rejected('CURRENT_PASSWORD_INVALID');
+    if (!user) throw rejected('ACCOUNT_NOT_FOUND');
+    if (user.passwordHash) {
+      if (typeof oldPassword !== 'string' || oldPassword.length === 0) throw rejected('INVALID_PROFILE_VALUE');
+      if (!await verifyPassword(oldPassword, user.passwordHash)) throw rejected('CURRENT_PASSWORD_INVALID');
+    }
+    if (newPassword.length < 8 || newPassword.length > 128) {
+      throw rejected('INVALID_PROFILE_VALUE');
+    }
     const passwordHash = await passwordService.hash(newPassword);
     return prisma.$transaction(async (tx) => {
       const updated = await tx.user.updateMany({ where: { id: userId, passwordHash: user.passwordHash }, data: { passwordHash } });

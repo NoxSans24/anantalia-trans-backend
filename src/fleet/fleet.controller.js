@@ -1,4 +1,4 @@
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function page(query) {
   const number = (value, fallback, min, max = Number.MAX_SAFE_INTEGER) => {
@@ -23,10 +23,24 @@ function statusFor(error) {
   const status = error?.status ?? error?.code;
   if (status === 'PERMISSION_DENIED') return [403, 'FORBIDDEN'];
   if (status === 'INVALID_INPUT') return [400, 'INVALID_INPUT'];
-  if (status === 'CATEGORY_NOT_FOUND' || status === 'MODEL_NOT_FOUND' || status === 'UNIT_NOT_FOUND' || status === 'MAINTENANCE_NOT_FOUND') return [404, 'NOT_FOUND'];
-  if (status === 'P2002' || status === 'DUPLICATE_PLATE' || status === 'CONCURRENCY_CONFLICT') return [409, 'CONFLICT'];
+  if (status === 'CATEGORY_NOT_FOUND' || status === 'MODEL_NOT_FOUND' || status === 'UNIT_NOT_FOUND' || status === 'MAINTENANCE_NOT_FOUND') return [404, status === 'MODEL_NOT_FOUND' ? 'MODEL_NOT_FOUND' : 'NOT_FOUND'];
+  if (status === 'P2002' || status === 'DUPLICATE_PLATE' || status === 'CONCURRENCY_CONFLICT') return [409, status === 'DUPLICATE_PLATE' ? 'DUPLICATE_PLATE' : 'CONFLICT'];
   if (status === 'P2025') return [404, 'NOT_FOUND'];
   return [500, 'INTERNAL_ERROR'];
+}
+
+function messageFor(status, code, error) {
+  if (status === 500) return 'Terjadi kesalahan internal pada server armada.';
+  if (error?.userMessage) return error.userMessage;
+  switch (code) {
+    case 'FORBIDDEN': return 'Anda tidak memiliki izin untuk aksi armada ini.';
+    case 'DUPLICATE_PLATE': return 'Nomor polisi sudah terdaftar pada unit armada lain.';
+    case 'MODEL_NOT_FOUND': return 'Model armada yang dipilih tidak ditemukan.';
+    case 'CONFLICT': return 'Terjadi konflik data atau nomor polisi sudah digunakan.';
+    case 'NOT_FOUND': return 'Data kategori, model, atau unit armada tidak ditemukan.';
+    case 'INVALID_INPUT': return 'Data yang dikirim belum lengkap atau formatnya tidak valid.';
+    default: return 'Permintaan tidak dapat diproses.';
+  }
 }
 
 export function createFleetController({ fleetService, logger } = {}) {
@@ -35,8 +49,8 @@ export function createFleetController({ fleetService, logger } = {}) {
     try { return await work(req, res); }
     catch (error) {
       const [status, code] = statusFor(error);
-      logger.error('fleet_request_failed', { requestId: req.id, status, errorType: error?.constructor?.name ?? 'Error' });
-      return res.status(status).json({ error: { code, message: status === 500 ? 'An unexpected error occurred' : 'The request could not be completed' }, requestId: req.id });
+      logger.error('fleet_request_failed', { requestId: req.id, status, code, errorType: error?.constructor?.name ?? 'Error' });
+      return res.status(status).json({ error: { code, message: messageFor(status, code, error) }, requestId: req.id });
     }
   };
   const authenticated = (req, res) => req.userId ? true : (res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }, requestId: req.id }), false);
@@ -123,7 +137,7 @@ export function createFleetController({ fleetService, logger } = {}) {
         actor: req.userId,
         modelId: req.query.modelId || undefined,
         status: req.query.status,
-        serviceDue: req.query.serviceDue,
+        serviceDue: req.query.serviceDue || req.query.serviceAlert,
         q,
         ...paging,
       }));
