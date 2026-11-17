@@ -36,9 +36,94 @@ function normalizeCategory(raw) {
   return VALID_CATEGORIES.includes(mapped) ? mapped : 'general';
 }
 
-export function createInboxService({ repository, authorizationService, activityLog, settingsRepository } = {}) {
+export function createInboxService({ repository, authorizationService, activityLog, settingsRepository, fetchImpl = globalThis.fetch } = {}) {
   const localMetaStore = new Map();
   let localTemplates = [];
+
+  async function dispatchEmailWebhook({ to, subject, text, messageId, replyId } = {}) {
+    const webhookUrl = typeof process.env.SMTP_WEBHOOK_URL === 'string' ? process.env.SMTP_WEBHOOK_URL.trim() : '';
+    const webhookSecret = (process.env.SMTP_WEBHOOK_SECRET || process.env.SMTP_WEBHOOK_TOKEN || '').trim();
+    const timeoutMs = Math.min(Math.max(Number(process.env.SMTP_WEBHOOK_TIMEOUT_MS) || 5000, 500), 30000);
+
+    if (!webhookUrl) {
+      return {
+        configured: false,
+        deliveryStatus: 'smtp_not_configured',
+        deliveryState: 'saved',
+        deliveryNote: 'Balasan dicatat di riwayat internal. Layanan email/SMTP belum dikonfigurasi pada server.',
+        deliveryError: null,
+      };
+    }
+
+    if (!to || typeof to !== 'string' || !to.trim()) {
+      return {
+        configured: true,
+        deliveryStatus: 'failed',
+        deliveryState: 'failed',
+        deliveryError: 'Alamat email penerima tidak tersedia.',
+        deliveryNote: 'Gagal dikirim: alamat email penerima tidak tersedia.',
+      };
+    }
+
+    let parsedWebhook = null;
+    try {
+      parsedWebhook = new URL(webhookUrl);
+    } catch {
+      parsedWebhook = null;
+    }
+
+    if (!parsedWebhook || !['http:', 'https:'].includes(parsedWebhook.protocol)) {
+      return {
+        configured: true,
+        deliveryStatus: 'failed',
+        deliveryState: 'failed',
+        deliveryError: 'Konfigurasi SMTP_WEBHOOK_URL tidak valid (harus http/https).',
+        deliveryNote: 'Gagal dikirim: konfigurasi SMTP_WEBHOOK_URL tidak valid.',
+      };
+    }
+
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (webhookSecret) {
+        headers.Authorization = `Bearer ${webhookSecret}`;
+        headers['X-Webhook-Secret'] = webhookSecret;
+      }
+      const resp = await fetchImpl(parsedWebhook.toString(), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ to: to.trim(), subject, text, messageId, replyId }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!resp.ok) {
+        const msg = `Email gateway merespons HTTP ${resp.status}`;
+        return {
+          configured: true,
+          deliveryStatus: 'failed',
+          deliveryState: 'failed',
+          deliveryError: msg,
+          deliveryNote: `Gagal dikirim: ${msg}. Silakan coba kirim ulang.`,
+        };
+      }
+      return {
+        configured: true,
+        deliveryStatus: 'sent',
+        deliveryState: 'sent',
+        deliveryNote: `Email terkirim ke ${to.trim()}`,
+        deliveryError: null,
+      };
+    } catch (err) {
+      const msg = err?.name === 'TimeoutError' || err?.name === 'AbortError'
+        ? `Timeout menghubungi layanan pengiriman email (${Math.round(timeoutMs / 1000)}s)`
+        : 'Gagal menghubungi layanan pengiriman email';
+      return {
+        configured: true,
+        deliveryStatus: 'failed',
+        deliveryState: 'failed',
+        deliveryError: msg,
+        deliveryNote: `Gagal dikirim: ${msg}. Silakan coba kirim ulang.`,
+      };
+    }
+  }
 
   async function readSetting(key, fallbackVal) {
     if (settingsRepository?.getSetting) {
@@ -376,66 +461,62 @@ export function createInboxService({ repository, authorizationService, activityL
         throw err;
       }
 
-      const webhookUrl = process.env.SMTP_WEBHOOK_URL;
-      let deliveryStatus = 'smtp_not_configured';
-      let deliveryNote = 'Balasan dicatat di riwayat internal. Layanan email/SMTP belum dikonfigurasi pada server.';
-
-      if (webhookUrl && existing.senderEmail) {
-        let parsedWebhook;
-        try {
-          parsedWebhook = new URL(webhookUrl);
-        } catch {
-          parsedWebhook = null;
-        }
-        if (!parsedWebhook || !['http:', 'https:'].includes(parsedWebhook.protocol)) {
-          const cfgErr = new Error('Konfigurasi SMTP_WEBHOOK_URL tidak valid (harus http/https)');
-          cfgErr.code = 'EMAIL_DELIVERY_FAILED';
-          cfgErr.status = 502;
-          throw cfgErr;
-        }
-        try {
-          const resp = await fetch(parsedWebhook.toString(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ to: existing.senderEmail, subject, text: body, messageId: id }),
-            signal: AbortSignal.timeout(5000),
-          });
-          if (!resp.ok) {
-            const err = new Error(`Email gateway returned status ${resp.status}`);
-            err.code = 'EMAIL_DELIVERY_FAILED';
-            err.status = 502;
-            throw err;
-          }
-          deliveryStatus = 'sent';
-          deliveryNote = `Terkirim ke ${existing.senderEmail}`;
-        } catch (err) {
-          if (err.code === 'EMAIL_DELIVERY_FAILED') throw err;
-          const netErr = new Error(err?.name === 'TimeoutError' ? 'Timeout menghubungi layanan pengiriman email (5s)' : 'Gagal menghubungi layanan pengiriman email');
-          netErr.code = 'EMAIL_DELIVERY_FAILED';
-          netErr.status = 502;
-          throw netErr;
-        }
-      }
-
+      const webhookConfigured = Boolean(typeof process.env.SMTP_WEBHOOK_URL === 'string' && process.env.SMTP_WEBHOOK_URL.trim());
+      const replyId = randomUUID();
       const nowIso = new Date().toISOString();
-      const meta = await getMeta(id);
-      const replyRecord = {
-        id: randomUUID(),
+      const initialMeta = await getMeta(id);
+      const pendingRecord = {
+        id: replyId,
         subject,
         body,
         sentBy: userId || 'admin',
         sentAt: nowIso,
-        deliveryStatus,
-        deliveryNote,
+        deliveryStatus: webhookConfigured ? 'pending_delivery' : 'smtp_not_configured',
+        deliveryState: webhookConfigured ? 'pending' : 'saved',
+        deliveryNote: webhookConfigured
+          ? 'Menunggu pengiriman ke layanan email...'
+          : 'Balasan dicatat di riwayat internal. Layanan email/SMTP belum dikonfigurasi pada server.',
+        deliveryError: null,
+        attempts: 0,
+        lastAttemptAt: null,
       };
       await saveMeta(id, {
-        ...meta,
-        firstResponseAt: meta.firstResponseAt || nowIso,
-        replies: [replyRecord, ...(Array.isArray(meta.replies) ? meta.replies : [])].slice(0, 30),
+        ...initialMeta,
+        firstResponseAt: initialMeta.firstResponseAt || nowIso,
+        replies: [pendingRecord, ...(Array.isArray(initialMeta.replies) ? initialMeta.replies : [])].slice(0, 30),
       });
 
-      if (deliveryStatus === 'sent' && repository?.updateMessage) {
-        await repository.updateMessage({ ...existing, status: 'replied', updatedAt: nowIso });
+      const outcome = await dispatchEmailWebhook({
+        to: existing.senderEmail,
+        subject,
+        text: body,
+        messageId: id,
+        replyId,
+      });
+
+      const attemptIso = new Date().toISOString();
+      const finalRecord = {
+        ...pendingRecord,
+        deliveryStatus: outcome.deliveryStatus,
+        deliveryState: outcome.deliveryState,
+        deliveryNote: outcome.deliveryNote,
+        deliveryError: outcome.deliveryError,
+        attempts: outcome.configured ? 1 : 0,
+        lastAttemptAt: outcome.configured ? attemptIso : null,
+      };
+
+      const latestMeta = await getMeta(id);
+      const updatedReplies = (Array.isArray(latestMeta.replies) ? latestMeta.replies : [finalRecord]).map((entry) =>
+        entry.id === replyId ? finalRecord : entry,
+      );
+      await saveMeta(id, {
+        ...latestMeta,
+        firstResponseAt: latestMeta.firstResponseAt || nowIso,
+        replies: updatedReplies,
+      });
+
+      if (finalRecord.deliveryStatus === 'sent' && repository?.updateMessage) {
+        await repository.updateMessage({ ...existing, status: 'replied', updatedAt: attemptIso });
       }
 
       if (activityLog?.log) {
@@ -444,15 +525,104 @@ export function createInboxService({ repository, authorizationService, activityL
           action: 'MESSAGE_REPLIED',
           resourceType: 'Message',
           resourceId: id,
-          details: { deliveryStatus },
+          details: { deliveryStatus: finalRecord.deliveryStatus, deliveryState: finalRecord.deliveryState },
+        }).catch(() => {});
+      }
+
+      if (finalRecord.deliveryStatus === 'failed' && input.strictWebhookError === true) {
+        const err = new Error(finalRecord.deliveryError || 'Gagal mengirim email balasan');
+        err.code = 'EMAIL_DELIVERY_FAILED';
+        err.status = 502;
+        err.reply = finalRecord;
+        throw err;
+      }
+
+      const refreshed = repository?.getMessageById ? await repository.getMessageById(id) : existing;
+      return {
+        item: await attachMeta(refreshed),
+        reply: finalRecord,
+        emailConfigured: outcome.configured,
+        deliverySuccess: finalRecord.deliveryStatus === 'sent',
+      };
+    },
+
+    async retryReplyDelivery({ userId, id, replyId = null } = {}) {
+      await assertPermission(userId, 'MESSAGE_UPDATE');
+      const existing = repository?.getMessageById ? await repository.getMessageById(id) : null;
+      if (!existing) {
+        const err = new Error('Message not found');
+        err.code = 'NOT_FOUND';
+        err.status = 404;
+        throw err;
+      }
+
+      const meta = await getMeta(id);
+      const replies = Array.isArray(meta.replies) ? meta.replies : [];
+      const target = replyId ? replies.find((r) => r.id === replyId) : replies[0];
+      if (!target) {
+        const err = new Error('Riwayat balasan tidak ditemukan');
+        err.code = 'NOT_FOUND';
+        err.status = 404;
+        throw err;
+      }
+      if (target.deliveryStatus === 'sent') {
+        const err = new Error('Balasan sudah berhasil dikirim sebelumnya');
+        err.code = 'ALREADY_SENT';
+        err.status = 409;
+        throw err;
+      }
+
+      const webhookUrl = typeof process.env.SMTP_WEBHOOK_URL === 'string' ? process.env.SMTP_WEBHOOK_URL.trim() : '';
+      if (!webhookUrl) {
+        const err = new Error('SMTP_WEBHOOK_URL belum dikonfigurasi pada server');
+        err.code = 'SMTP_NOT_CONFIGURED';
+        err.status = 503;
+        throw err;
+      }
+
+      const outcome = await dispatchEmailWebhook({
+        to: existing.senderEmail,
+        subject: target.subject,
+        text: target.body,
+        messageId: id,
+        replyId: target.id,
+      });
+
+      const attemptIso = new Date().toISOString();
+      const updatedReply = {
+        ...target,
+        deliveryStatus: outcome.deliveryStatus,
+        deliveryState: outcome.deliveryState,
+        deliveryNote: outcome.deliveryNote,
+        deliveryError: outcome.deliveryError,
+        attempts: (Number(target.attempts) || 0) + 1,
+        lastAttemptAt: attemptIso,
+      };
+      await saveMeta(id, {
+        ...meta,
+        replies: replies.map((entry) => (entry.id === target.id ? updatedReply : entry)),
+      });
+
+      if (updatedReply.deliveryStatus === 'sent' && repository?.updateMessage) {
+        await repository.updateMessage({ ...existing, status: 'replied', updatedAt: attemptIso });
+      }
+
+      if (activityLog?.log) {
+        await activityLog.log({
+          actor: userId,
+          action: 'MESSAGE_REPLY_RETRIED',
+          resourceType: 'Message',
+          resourceId: id,
+          details: { replyId: target.id, deliveryStatus: updatedReply.deliveryStatus, attempts: updatedReply.attempts },
         }).catch(() => {});
       }
 
       const refreshed = repository?.getMessageById ? await repository.getMessageById(id) : existing;
       return {
         item: await attachMeta(refreshed),
-        reply: replyRecord,
-        emailConfigured: Boolean(webhookUrl),
+        reply: updatedReply,
+        emailConfigured: true,
+        deliverySuccess: updatedReply.deliveryStatus === 'sent',
       };
     },
 

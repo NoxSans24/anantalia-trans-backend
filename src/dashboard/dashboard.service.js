@@ -19,12 +19,14 @@ export function createDashboardService({ repository, authorizationService } = {}
           publicRentalCapabilities,
           total,
           waitingConfirmation,
+          underVerification,
           confirmed,
           completed,
         ] = await Promise.all([
           ...basePromises,
           repository.countBookings({}),
           repository.countBookings({ status: 'waiting_confirmation' }),
+          repository.countBookings({ status: 'under_verification' }),
           repository.countBookings({ status: 'confirmed' }),
           repository.countBookings({ status: 'completed' }),
         ]);
@@ -35,7 +37,7 @@ export function createDashboardService({ repository, authorizationService } = {}
             verifiedModels,
             pendingVerificationModels,
             publicRentalCapabilities,
-            bookings: { total, waitingConfirmation, confirmed, completed },
+            bookings: { total, waitingConfirmation, underVerification, confirmed, completed },
           },
         };
       }

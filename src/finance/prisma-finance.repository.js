@@ -125,12 +125,39 @@ export function createPrismaFinanceRepository(prisma) {
       const totalExpenses = Number(expenseAgg?._sum?.amount ?? 0);
       const totalRefunds = Number(refundAgg?._sum?.amount ?? 0);
 
+      let pendingInvoices = 0;
+      if (typeof prisma.booking?.findMany === 'function') {
+        try {
+          const [activeBookings, paidTxs] = await Promise.all([
+            prisma.booking.findMany({
+              where: { status: { in: ['waiting_confirmation', 'under_verification', 'confirmed'] } },
+              select: { id: true, bookingCode: true },
+            }),
+            prisma.financeTransaction.findMany({
+              where: {
+                status: { notIn: ['void', 'reversed'] },
+                type: 'income',
+                bookingId: { not: null },
+              },
+              select: { bookingId: true },
+            }),
+          ]);
+          const paidRefs = new Set((paidTxs || []).map((t) => t.bookingId).filter(Boolean));
+          pendingInvoices = (activeBookings || []).filter(
+            (b) => !paidRefs.has(b.id) && !(b.bookingCode && paidRefs.has(b.bookingCode)),
+          ).length;
+        } catch {
+          pendingInvoices = 0;
+        }
+      }
+
       return {
         totalRevenue,
         totalExpenses,
         totalRefunds,
         netProfit: totalRevenue - totalExpenses - totalRefunds,
         transactionCount,
+        pendingInvoices,
       };
     },
   });

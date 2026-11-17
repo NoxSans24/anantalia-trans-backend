@@ -1,9 +1,13 @@
 import express from 'express';
 
 function sendRouteError(req, res, error, logger, event) {
-  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500 ? error.status : 500;
-  const code = status < 500 && typeof error?.code === 'string' ? error.code : 'INTERNAL_ERROR';
-  const message = status < 500 && typeof error?.message === 'string' ? error.message : 'An unexpected error occurred';
+  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500
+    ? error.status
+    : [502, 503].includes(error?.status)
+      ? error.status
+      : 500;
+  const code = status < 500 || status === 502 || status === 503 ? (error?.code || 'ERROR') : 'INTERNAL_ERROR';
+  const message = status < 500 || status === 502 || status === 503 ? (error?.message || 'Request failed') : 'An unexpected error occurred';
   if (status >= 500) {
     logger?.error?.(event, { requestId: req.id, errorType: error?.constructor?.name ?? 'Error' });
   }
@@ -72,6 +76,15 @@ export function createContentRouter({ contentService, logger } = {}) {
       return res.status(200).json(result);
     } catch (error) {
       return sendRouteError(req, res, error, logger, 'content_restore_failed');
+    }
+  });
+
+  router.post('/content/upload-image', async (req, res) => {
+    try {
+      const result = await contentService.uploadContentImage({ userId: req.userId, input: req.body });
+      return res.status(201).json(result);
+    } catch (error) {
+      return sendRouteError(req, res, error, logger, 'content_upload_image_failed');
     }
   });
 

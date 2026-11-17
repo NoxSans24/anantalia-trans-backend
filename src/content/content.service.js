@@ -25,8 +25,8 @@ export function validateSafeUrl(value, { allowDataImage = false, fieldName = 'UR
   if (!trimmed) return null;
 
   if (allowDataImage && /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
-    if (trimmed.length > 65000) {
-      const err = new Error(`${fieldName} image payload exceeds 65KB limit`);
+    if (trimmed.length > 360000) {
+      const err = new Error(`${fieldName} image payload exceeds size limit`);
       err.code = 'INVALID_INPUT';
       err.status = 400;
       throw err;
@@ -68,6 +68,7 @@ function normalizeMeta(inputMeta = {}, existingMeta = {}) {
   assignStr('ctaLabel', 80);
   assignStr('promoCode', 60);
   assignStr('authorName', 100);
+  assignStr('objectKey', 300);
 
   if ('canonicalUrl' in inputMeta) merged.canonicalUrl = validateSafeUrl(inputMeta.canonicalUrl, { fieldName: 'canonicalUrl' });
   if ('ctaUrl' in inputMeta) merged.ctaUrl = validateSafeUrl(inputMeta.ctaUrl, { fieldName: 'ctaUrl' });
@@ -138,9 +139,100 @@ export function isContentCurrentlyLive(item, meta = {}, now = new Date()) {
   return false;
 }
 
-export function createContentService({ repository, authorizationService, activityLog, settingsRepository } = {}) {
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const MIME_EXTENSION_MAP = Object.freeze({
+  'image/png': ['png'],
+  'image/jpeg': ['jpg', 'jpeg'],
+  'image/webp': ['webp'],
+});
+
+function validateImagePayload({ fileName, mimeType, dataBase64, maxBytes } = {}) {
+  const errInvalid = (message, code = 'INVALID_INPUT') => {
+    const err = new Error(message);
+    err.code = code;
+    err.status = 400;
+    return err;
+  };
+
+  if (typeof fileName !== 'string' || !fileName.trim()) {
+    throw errInvalid('Nama berkas gambar wajib diisi.');
+  }
+  const cleanName = fileName.trim();
+  if (cleanName.includes('..') || cleanName.includes('/') || cleanName.includes('\\') || cleanName.includes('\0')) {
+    throw errInvalid('Nama berkas mengandung karakter path yang tidak diizinkan.', 'INVALID_FILE_NAME');
+  }
+  if (/\.(php|phtml|html?|js|mjs|cjs|svg|exe|sh|bat|cmd|ps1)\./i.test(cleanName)) {
+    throw errInvalid('Nama berkas mengandung ekstensi ganda yang tidak aman.', 'INVALID_FILE_NAME');
+  }
+  const nameMatch = cleanName.match(/^([a-zA-Z0-9 ._-]{1,120})\.([a-zA-Z0-9]+)$/);
+  if (!nameMatch) {
+    throw errInvalid('Format nama berkas tidak valid. Gunakan huruf, angka, spasi, titik, underscore, atau strip.', 'INVALID_FILE_NAME');
+  }
+  const baseSlug = nameMatch[1].replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'image';
+  const ext = nameMatch[2].toLowerCase();
+
+  const normalizedMime = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
+  if (!ALLOWED_IMAGE_MIME_TYPES.has(normalizedMime)) {
+    throw errInvalid('Tipe MIME tidak didukung. Hanya image/png, image/jpeg, dan image/webp yang diizinkan.', 'INVALID_MIME_TYPE');
+  }
+  if (!MIME_EXTENSION_MAP[normalizedMime].includes(ext)) {
+    throw errInvalid('Ekstensi berkas tidak cocok dengan tipe MIME gambar.', 'INVALID_FILE_EXTENSION');
+  }
+
+  if (typeof dataBase64 !== 'string' || !dataBase64.trim()) {
+    throw errInvalid('Data gambar base64 wajib diisi.');
+  }
+  const stripped = dataBase64.trim().replace(/^data:image\/[a-z0-9+.-]+;base64,/i, '').replace(/\s+/g, '');
+  if (!stripped || !/^[A-Za-z0-9+/=]+$/.test(stripped)) {
+    throw errInvalid('Format base64 gambar tidak valid.');
+  }
+  const bytes = Buffer.from(stripped, 'base64');
+  if (bytes.length === 0) {
+    throw errInvalid('Berkas gambar kosong.');
+  }
+  if (bytes.length > maxBytes) {
+    throw errInvalid(`Ukuran gambar (${bytes.length} byte) melebihi batas ${Math.round(maxBytes / 1024)} KB.`, 'FILE_TOO_LARGE');
+  }
+
+  const isPng =
+    normalizedMime === 'image/png' &&
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a;
+  const isJpeg =
+    normalizedMime === 'image/jpeg' &&
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff;
+  const isWebp =
+    normalizedMime === 'image/webp' &&
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+
+  if (!isPng && !isJpeg && !isWebp) {
+    throw errInvalid('Isi biner berkas tidak sesuai dengan format gambar yang dideklarasikan.', 'INVALID_IMAGE_SIGNATURE');
+  }
+
+  return {
+    safeName: `${baseSlug}.${ext}`,
+    mimeType: normalizedMime,
+    cleanBase64: stripped,
+    bytes,
+  };
+}
+
+export function createContentService({ repository, authorizationService, activityLog, settingsRepository, fetchImpl = globalThis.fetch } = {}) {
   const localMetaStore = new Map();
   const localRevisionStore = new Map();
+  const localMediaStore = new Map();
 
   async function readJsonSetting(key, fallback) {
     if (settingsRepository?.getSetting) {
@@ -538,6 +630,149 @@ export function createContentService({ repository, authorizationService, activit
         .slice(0, safeLimit);
 
       return { items: liveItems };
+    },
+
+    async uploadContentImage({ userId, input = {} } = {}) {
+      if (authorizationService) {
+        const canCreate = await authorizationService.hasPermission(userId, 'CONTENT_CREATE');
+        const canUpdate = await authorizationService.hasPermission(userId, 'CONTENT_UPDATE');
+        if (!canCreate && !canUpdate) {
+          const err = new Error('Permission denied');
+          err.code = 'FORBIDDEN';
+          err.status = 403;
+          throw err;
+        }
+      }
+
+      const externalUrlRaw = (process.env.OBJECT_STORAGE_UPLOAD_URL || process.env.CMS_STORAGE_WEBHOOK_URL || '').trim();
+      const maxBytes = externalUrlRaw ? 2 * 1024 * 1024 : 262144;
+      const { safeName, mimeType, cleanBase64, bytes } = validateImagePayload({
+        fileName: input?.fileName,
+        mimeType: input?.mimeType,
+        dataBase64: input?.dataBase64,
+        maxBytes,
+      });
+
+      const mediaId = randomUUID();
+      let objectKey = `cms-media/${mediaId}/${safeName}`;
+      let externalImageUrl = null;
+
+      if (externalUrlRaw) {
+        let parsedStorageUrl = null;
+        try {
+          parsedStorageUrl = new URL(externalUrlRaw);
+        } catch {
+          parsedStorageUrl = null;
+        }
+        if (!parsedStorageUrl || !['http:', 'https:'].includes(parsedStorageUrl.protocol)) {
+          const err = new Error('Konfigurasi OBJECT_STORAGE_UPLOAD_URL tidak valid (harus http/https).');
+          err.code = 'OBJECT_STORAGE_UPLOAD_FAILED';
+          err.status = 502;
+          throw err;
+        }
+        const storageToken = (process.env.OBJECT_STORAGE_TOKEN || process.env.CMS_STORAGE_TOKEN || '').trim();
+        try {
+          const headers = { 'Content-Type': 'application/json' };
+          if (storageToken) headers.Authorization = `Bearer ${storageToken}`;
+          const resp = await fetchImpl(parsedStorageUrl.toString(), {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              objectKey,
+              fileName: safeName,
+              mimeType,
+              sizeBytes: bytes.length,
+              dataBase64: cleanBase64,
+            }),
+            signal: AbortSignal.timeout(8000),
+          });
+          const payload = await resp.json().catch(() => null);
+          const candidateUrl = payload?.imageUrl || payload?.publicUrl || payload?.url || null;
+          if (!resp.ok || typeof candidateUrl !== 'string' || !/^https?:\/\//i.test(candidateUrl.trim())) {
+            const err = new Error(`Gagal mengunggah berkas ke object storage (HTTP ${resp.status}).`);
+            err.code = 'OBJECT_STORAGE_UPLOAD_FAILED';
+            err.status = 502;
+            throw err;
+          }
+          externalImageUrl = candidateUrl.trim();
+          if (typeof payload?.objectKey === 'string' && payload.objectKey.trim()) {
+            objectKey = payload.objectKey.trim().slice(0, 300);
+          }
+        } catch (err) {
+          if (err?.code === 'OBJECT_STORAGE_UPLOAD_FAILED') throw err;
+          const upErr = new Error(err?.name === 'TimeoutError' ? 'Timeout mengunggah berkas ke object storage (8s).' : 'Gagal menghubungi layanan object storage.');
+          upErr.code = 'OBJECT_STORAGE_UPLOAD_FAILED';
+          upErr.status = 502;
+          throw upErr;
+        }
+      }
+
+      const mediaUrl = `/api/v1/public/content-media/${mediaId}`;
+      const record = {
+        mediaId,
+        objectKey,
+        fileName: safeName,
+        mimeType,
+        sizeBytes: bytes.length,
+        storageMode: externalUrlRaw ? 'external_object_storage' : 'database_inline',
+        externalUrl: externalImageUrl,
+        dataBase64: externalUrlRaw ? null : cleanBase64,
+        createdAt: new Date().toISOString(),
+        createdBy: userId || 'admin',
+      };
+      await writeJsonSetting(`cms_media:${mediaId}`, record, localMediaStore);
+
+      if (activityLog?.log) {
+        await activityLog.log({
+          actor: userId,
+          action: 'CONTENT_IMAGE_UPLOADED',
+          resourceType: 'ContentMedia',
+          resourceId: mediaId,
+          details: { objectKey, mimeType, sizeBytes: bytes.length, storageMode: record.storageMode },
+        }).catch(() => {});
+      }
+
+      return {
+        mediaId,
+        objectKey,
+        fileName: safeName,
+        mimeType,
+        sizeBytes: bytes.length,
+        mediaUrl,
+        imageUrl: externalImageUrl || mediaUrl,
+        storageMode: record.storageMode,
+        externalStorageConfigured: Boolean(externalUrlRaw),
+      };
+    },
+
+    async getPublicMediaById({ mediaId } = {}) {
+      if (typeof mediaId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(mediaId.trim())) {
+        const err = new Error('Media not found');
+        err.code = 'NOT_FOUND';
+        err.status = 404;
+        throw err;
+      }
+      const record = await readJsonSetting(`cms_media:${mediaId.trim()}`, localMediaStore);
+      if (!record) {
+        const err = new Error('Media not found');
+        err.code = 'NOT_FOUND';
+        err.status = 404;
+        throw err;
+      }
+      if (record.externalUrl) {
+        return { redirectUrl: record.externalUrl };
+      }
+      if (typeof record.dataBase64 === 'string' && record.dataBase64.length > 0) {
+        return {
+          mimeType: record.mimeType || 'image/png',
+          fileName: record.fileName || 'image',
+          buffer: Buffer.from(record.dataBase64, 'base64'),
+        };
+      }
+      const err = new Error('Media not found');
+      err.code = 'NOT_FOUND';
+      err.status = 404;
+      throw err;
     },
 
     async getPublicContentBySlug({ slug } = {}) {

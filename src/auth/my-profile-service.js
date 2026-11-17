@@ -1,3 +1,5 @@
+import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
+
 const DEFAULT_USER_PREFS = Object.freeze({
   theme: 'light',
   tableDensity: 'comfortable',
@@ -67,8 +69,31 @@ function normalizePhone(phone) {
   return normalized;
 }
 
-export function createMyProfileService({ prisma, passwordService, activityLog, totpFactorService, settingsRepository } = {}) {
+export function createMyProfileService({ prisma, passwordService, activityLog, totpFactorService, settingsRepository, fetchImpl = globalThis.fetch } = {}) {
   if (!prisma || !passwordService || !activityLog) throw new TypeError('All dependencies required');
+  const localEmailChallenges = new Map();
+
+  async function readEmailChallenge(userId) {
+    if (settingsRepository?.get) {
+      const raw = await settingsRepository.get(`email_change_otp:${userId}`);
+      if (raw && typeof raw === 'string') {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
+      }
+    }
+    return localEmailChallenges.get(userId) ?? null;
+  }
+
+  async function writeEmailChallenge(userId, challenge) {
+    if (challenge) localEmailChallenges.set(userId, challenge);
+    else localEmailChallenges.delete(userId);
+    if (settingsRepository?.set) {
+      await settingsRepository.set(`email_change_otp:${userId}`, challenge ? JSON.stringify(challenge) : '').catch(() => {});
+    }
+  }
 
   async function readUserMeta(userId) {
     if (!settingsRepository?.get) return {};
@@ -164,6 +189,140 @@ export function createMyProfileService({ prisma, passwordService, activityLog, t
 
   async function updateEmail() {
     throw rejected('EMAIL_VERIFICATION_REQUIRED');
+  }
+
+  async function requestEmailChange(userId, { newEmail } = {}) {
+    if (!userId) throw rejected('ACCOUNT_NOT_FOUND');
+    const normalizedEmail = typeof newEmail === 'string' ? newEmail.trim().toLowerCase() : '';
+    if (!normalizedEmail || normalizedEmail.length > 254 || !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(normalizedEmail)) {
+      throw rejected('INVALID_PROFILE_VALUE');
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, status: true, deletedAt: true } });
+    if (!user || user.status !== 'ACTIVE' || user.deletedAt) throw rejected('ACCOUNT_NOT_FOUND');
+    if (normalizedEmail === String(user.email || '').trim().toLowerCase()) {
+      throw rejected('INVALID_PROFILE_VALUE');
+    }
+
+    const existingOwner = await prisma.user.findUnique({ where: { email: normalizedEmail }, select: { id: true } });
+    if (existingOwner && existingOwner.id !== userId) {
+      throw rejected('PROFILE_VALUE_IN_USE');
+    }
+
+    const webhookUrl = typeof process.env.SMTP_WEBHOOK_URL === 'string' ? process.env.SMTP_WEBHOOK_URL.trim() : '';
+    if (!webhookUrl) {
+      throw rejected('EMAIL_SERVICE_NOT_CONFIGURED');
+    }
+    let parsedWebhook = null;
+    try {
+      parsedWebhook = new URL(webhookUrl);
+    } catch {
+      parsedWebhook = null;
+    }
+    if (!parsedWebhook || !['http:', 'https:'].includes(parsedWebhook.protocol)) {
+      throw rejected('EMAIL_DELIVERY_FAILED');
+    }
+
+    const otp = String(randomInt(100000, 1000000));
+    const otpHash = createHash('sha256').update(`${userId}:${normalizedEmail}:${otp}`).digest('hex');
+    const expiresAt = Date.now() + 600_000;
+    await writeEmailChallenge(userId, {
+      newEmail: normalizedEmail,
+      otpHash,
+      expiresAt,
+      consumedAt: null,
+      attempts: 0,
+    });
+
+    const timeoutMs = Math.min(Math.max(Number(process.env.SMTP_WEBHOOK_TIMEOUT_MS) || 5000, 500), 30000);
+    const webhookSecret = (process.env.SMTP_WEBHOOK_SECRET || process.env.SMTP_WEBHOOK_TOKEN || '').trim();
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (webhookSecret) {
+        headers.Authorization = `Bearer ${webhookSecret}`;
+        headers['X-Webhook-Secret'] = webhookSecret;
+      }
+      const resp = await fetchImpl(parsedWebhook.toString(), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          to: normalizedEmail,
+          subject: 'Kode Verifikasi Perubahan Email — Anatalia Trans',
+          text: `Gunakan kode verifikasi berikut untuk mengonfirmasi perubahan alamat email Anda: ${otp}. Kode berlaku selama 10 menit.`,
+          purpose: 'email_change_verification',
+          userId,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!resp.ok) {
+        await writeEmailChallenge(userId, null);
+        throw rejected('EMAIL_DELIVERY_FAILED');
+      }
+    } catch (err) {
+      await writeEmailChallenge(userId, null);
+      if (err?.status === 'EMAIL_DELIVERY_FAILED') throw err;
+      throw rejected('EMAIL_DELIVERY_FAILED');
+    }
+
+    await activityLog.log({
+      actor: userId,
+      action: 'EMAIL_CHANGE_OTP_REQUESTED',
+      resourceType: 'User',
+      resourceId: userId,
+      targetUserId: userId,
+      details: { targetEmail: normalizedEmail },
+      client: prisma,
+    }).catch(() => {});
+
+    return {
+      status: 'EMAIL_VERIFICATION_SENT',
+      targetEmail: normalizedEmail,
+      expiresInSeconds: 600,
+    };
+  }
+
+  async function confirmEmailChange(userId, { newEmail, code } = {}) {
+    if (!userId) throw rejected('ACCOUNT_NOT_FOUND');
+    const normalizedEmail = typeof newEmail === 'string' ? newEmail.trim().toLowerCase() : '';
+    const trimmedCode = typeof code === 'string' ? code.trim() : '';
+    if (!normalizedEmail || !/^\d{6}$/.test(trimmedCode)) {
+      throw rejected('EMAIL_OTP_INVALID');
+    }
+
+    const challenge = await readEmailChallenge(userId);
+    if (
+      !challenge ||
+      !challenge.otpHash ||
+      challenge.consumedAt ||
+      Date.now() > Number(challenge.expiresAt) ||
+      challenge.newEmail !== normalizedEmail
+    ) {
+      throw rejected('EMAIL_OTP_EXPIRED_OR_INVALID');
+    }
+
+    const currentAttempts = Number(challenge.attempts) || 0;
+    if (currentAttempts >= 5) {
+      throw rejected('EMAIL_OTP_MAX_ATTEMPTS');
+    }
+
+    const candidateHash = createHash('sha256').update(`${userId}:${normalizedEmail}:${trimmedCode}`).digest('hex');
+    const expectedBuf = Buffer.from(challenge.otpHash, 'hex');
+    const actualBuf = Buffer.from(candidateHash, 'hex');
+    const matches = expectedBuf.length === actualBuf.length && timingSafeEqual(expectedBuf, actualBuf);
+
+    if (!matches) {
+      const nextAttempts = currentAttempts + 1;
+      await writeEmailChallenge(userId, { ...challenge, attempts: nextAttempts });
+      throw rejected(nextAttempts >= 5 ? 'EMAIL_OTP_MAX_ATTEMPTS' : 'EMAIL_OTP_INVALID');
+    }
+
+    const existingOwner = await prisma.user.findUnique({ where: { email: normalizedEmail }, select: { id: true } });
+    if (existingOwner && existingOwner.id !== userId) {
+      throw rejected('PROFILE_VALUE_IN_USE');
+    }
+
+    await writeEmailChallenge(userId, { ...challenge, consumedAt: new Date().toISOString() });
+    return updateIdentifier(userId, normalizedEmail, 'email', 'PROFILE_EMAIL_UPDATED');
   }
 
   async function updateIdentifier(userId, value, field, action) {
@@ -372,6 +531,8 @@ export function createMyProfileService({ prisma, passwordService, activityLog, t
     confirmMfaEnrollment,
     revokeMfaFactor,
     updateEmail,
+    requestEmailChange,
+    confirmEmailChange,
     updateUsername,
     updateDisplayName,
     changePassword,

@@ -41,6 +41,8 @@ export function createApp({
     res.setHeader('X-Request-Id', req.id);
     next();
   });
+  app.use('/api/v1/admin/content/upload-image', express.json({ limit: '3mb' }));
+  app.use('/api/me/meta', express.json({ limit: '500kb' }));
   app.use(express.json({ limit: '100kb' }));
   app.use((req, res, next) => {
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) req.body = {};

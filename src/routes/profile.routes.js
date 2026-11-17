@@ -9,9 +9,11 @@ export function createProfileRouter({ myProfileService, logger } = {}) {
     const code = error?.status ?? 'INTERNAL_ERROR';
     const status = code === 'ACCOUNT_NOT_FOUND' ? 404
       : code === 'EMAIL_VERIFICATION_REQUIRED' ? 501
-      : code === 'MFA_NOT_CONFIGURED' ? 503
+      : code === 'EMAIL_DELIVERY_FAILED' ? 502
+      : code === 'MFA_NOT_CONFIGURED' || code === 'EMAIL_SERVICE_NOT_CONFIGURED' ? 503
+      : code === 'EMAIL_OTP_MAX_ATTEMPTS' ? 429
       : code === 'PROFILE_VALUE_IN_USE' || code === 'PROFILE_UPDATE_CONFLICT' ? 409
-      : code === 'INVALID_PROFILE_VALUE' || code === 'CURRENT_PASSWORD_INVALID' || code === 'MFA_VERIFICATION_FAILED' || code === 'MFA_REVOCATION_FAILED' || code === 'MFA_ENROLLMENT_FAILED' ? 400 : 500;
+      : code === 'INVALID_PROFILE_VALUE' || code === 'CURRENT_PASSWORD_INVALID' || code === 'MFA_VERIFICATION_FAILED' || code === 'MFA_REVOCATION_FAILED' || code === 'MFA_ENROLLMENT_FAILED' || code === 'EMAIL_OTP_INVALID' || code === 'EMAIL_OTP_EXPIRED_OR_INVALID' ? 400 : 500;
     return res.status(status).json({ error: { code } });
   }
 
@@ -92,6 +94,35 @@ export function createProfileRouter({ myProfileService, logger } = {}) {
       return res.status(200).json(updated);
     } catch (error) {
       logger?.error?.('profile_email_update_failed', { requestId: req.id });
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/me/email/request-otp', async (req, res) => {
+    try {
+      const userId = req.userId;
+      if (!userId) return res.status(401).json({ error: { code: 'UNAUTHENTICATED' } });
+
+      const result = await myProfileService.requestEmailChange(userId, { newEmail: req.body?.newEmail ?? req.body?.email });
+      return res.status(200).json(result);
+    } catch (error) {
+      logger?.error?.('profile_email_request_otp_failed', { requestId: req.id });
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/me/email/confirm-otp', async (req, res) => {
+    try {
+      const userId = req.userId;
+      if (!userId) return res.status(401).json({ error: { code: 'UNAUTHENTICATED' } });
+
+      const result = await myProfileService.confirmEmailChange(userId, {
+        newEmail: req.body?.newEmail ?? req.body?.email,
+        code: req.body?.code,
+      });
+      return res.status(200).json(result);
+    } catch (error) {
+      logger?.error?.('profile_email_confirm_otp_failed', { requestId: req.id });
       return sendError(res, error);
     }
   });

@@ -81,9 +81,11 @@ const bookingService = createBookingService({
 });
 const publicBookingRouter = createPublicBookingRouter({ bookingService, rateLimitMiddleware, logger });
 const contentRepository = createPrismaContentRepository(prisma);
+const analyticsRepository = createPrismaAnalyticsRepository(prisma);
+const analyticsService = createAnalyticsService({ repository: analyticsRepository, authorizationService: authService, settingsRepository });
 const settingsService = createSettingsService({ repository: settingsRepository, authorizationService: authService, activityLog, prisma });
 const contentService = createContentService({ repository: contentRepository, authorizationService: authService, activityLog, settingsRepository });
-const publicContentRouter = createPublicContentRouter({ contentService, settingsService, logger });
+const publicContentRouter = createPublicContentRouter({ contentService, settingsService, analyticsService, logger });
 const inboxRepository = createPrismaInboxRepository(prisma);
 const inboxService = createInboxService({ repository: inboxRepository, authorizationService: authService, activityLog, settingsRepository });
 const publicContactRouter = createPublicContactRouter({ inboxService, rateLimitMiddleware, logger });
@@ -185,8 +187,7 @@ if (totpFactorService && csrfMiddleware && passwordConfigurationValid) {
   financeRouter = createFinanceRouter({ financeService: createFinanceService({ repository: financeRepository, authorizationService: authService, activityLog }), logger });
   inboxRouter = createInboxRouter({ inboxService, logger });
   contentRouter = createContentRouter({ contentService, logger });
-  const analyticsRepository = createPrismaAnalyticsRepository(prisma);
-  analyticsRouter = createAnalyticsRouter({ analyticsService: createAnalyticsService({ repository: analyticsRepository, authorizationService: authService }), logger });
+  analyticsRouter = createAnalyticsRouter({ analyticsService, logger });
   settingsRouter = createSettingsRouter({ settingsService, logger });
 }
 

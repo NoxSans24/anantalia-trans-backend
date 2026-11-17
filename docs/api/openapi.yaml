@@ -552,8 +552,8 @@ paths:
         '404': { description: Account not found }
   /api/me/email:
     post:
-      summary: Request a verified email change
-      description: Requires CSRF token in X-CSRF-Token or the request body. The verification flow is not implemented.
+      summary: Reject direct unverified email change
+      description: Direct email change without OTP verification is rejected with EMAIL_VERIFICATION_REQUIRED. Use /api/me/email/request-otp and /api/me/email/confirm-otp instead.
       security: [{ sessionCookie: [], csrfCookie: [] }]
       requestBody:
         required: true
@@ -567,7 +567,45 @@ paths:
                 csrfToken: { type: string, writeOnly: true }
       responses:
         '401': { description: Authentication required }
-        '501': { description: Email verification flow is not implemented }
+        '501': { description: Email verification OTP flow required }
+  /api/me/email/request-otp:
+    post:
+      summary: Request OTP verification code for email change
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newEmail]
+              properties:
+                newEmail: { type: string, format: email }
+      responses:
+        '200': { description: OTP dispatched to target email }
+        '400': { description: Invalid email value }
+        '409': { description: Email already in use }
+        '502': { description: Email gateway delivery failed }
+        '503': { description: Email service not configured (SMTP_WEBHOOK_URL missing) }
+  /api/me/email/confirm-otp:
+    post:
+      summary: Confirm email change with 6-digit OTP
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newEmail, code]
+              properties:
+                newEmail: { type: string, format: email }
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200': { description: Email updated after OTP verification }
+        '400': { description: Invalid or expired OTP }
+        '409': { description: Email already in use }
+        '429': { description: Maximum OTP verification attempts exceeded }
   /api/me/username:
     post:
       summary: Change the authenticated user's username
@@ -973,6 +1011,39 @@ paths:
         '401': { description: Authentication required }
         '403': { description: Permission denied or CSRF validation failed }
         '404': { description: Message not found }
+  /api/v1/admin/messages/{id}/reply-retry:
+    post:
+      summary: Retry failed or queued email delivery for a message reply
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Retry executed }
+        '404': { description: Message or reply not found }
+        '409': { description: Reply already sent }
+        '503': { description: SMTP_WEBHOOK_URL not configured }
+  /api/v1/admin/content/upload-image:
+    post:
+      summary: Validate and store CMS image media
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      responses:
+        '201': { description: Image validated and stored }
+        '400': { description: Invalid image extension, MIME type, or binary signature }
+        '502': { description: External object storage upload failed }
+  /api/v1/public/content-media/{mediaId}:
+    get:
+      summary: Serve stored CMS media image
+      parameters:
+        - { in: path, name: mediaId, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Binary image content }
+        '404': { description: Media not found }
+  /api/v1/public/analytics/pageview:
+    post:
+      summary: Record anonymized public page view
+      responses:
+        '202': { description: Page view processed (DNT and bots respected) }
+        '400': { description: Invalid page path }
   /api/v1/admin/content:
     get:
       summary: List website content items

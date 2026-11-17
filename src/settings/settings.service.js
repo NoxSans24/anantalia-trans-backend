@@ -62,7 +62,7 @@ function sanitizeLogDetails(details) {
   return clean;
 }
 
-export function createSettingsService({ repository, authorizationService, activityLog, prisma } = {}) {
+export function createSettingsService({ repository, authorizationService, activityLog, prisma, fetchImpl = globalThis.fetch } = {}) {
   async function assertPermission(userId, permission) {
     if (authorizationService) {
       const allowed = await authorizationService.hasPermission(userId, permission);
@@ -310,8 +310,19 @@ export function createSettingsService({ repository, authorizationService, activi
           message: 'SMTP_WEBHOOK_URL tidak valid (harus URL http atau https).',
         };
       }
+      const timeoutMs = Math.min(Math.max(Number(process.env.SMTP_WEBHOOK_TIMEOUT_MS) || 5000, 500), 30000);
+      const webhookSecret = (process.env.SMTP_WEBHOOK_SECRET || process.env.SMTP_WEBHOOK_TOKEN || '').trim();
       try {
-        const res = await fetch(parsedWebhook.toString(), { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+        const headers = {};
+        if (webhookSecret) {
+          headers.Authorization = `Bearer ${webhookSecret}`;
+          headers['X-Webhook-Secret'] = webhookSecret;
+        }
+        const res = await fetchImpl(parsedWebhook.toString(), {
+          method: 'HEAD',
+          headers,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
         return {
           ok: res.ok,
           configured: true,
@@ -324,7 +335,9 @@ export function createSettingsService({ repository, authorizationService, activi
           ok: false,
           configured: true,
           checkedAt,
-          message: err?.name === 'TimeoutError' ? 'Timeout menghubungi SMTP_WEBHOOK_URL (5s).' : 'Gagal menghubungi endpoint SMTP_WEBHOOK_URL.',
+          message: err?.name === 'TimeoutError' || err?.name === 'AbortError'
+            ? `Timeout menghubungi SMTP_WEBHOOK_URL (${Math.round(timeoutMs / 1000)}s).`
+            : 'Gagal menghubungi endpoint SMTP_WEBHOOK_URL.',
         };
       }
     },

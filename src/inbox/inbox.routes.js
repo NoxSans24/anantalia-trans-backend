@@ -3,11 +3,11 @@ import express from 'express';
 function sendRouteError(req, res, error, logger, event) {
   const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 500
     ? error.status
-    : error?.status === 502
-      ? 502
+    : [502, 503].includes(error?.status)
+      ? error.status
       : 500;
-  const code = status < 500 || status === 502 ? (error?.code || 'ERROR') : 'INTERNAL_ERROR';
-  const message = status < 500 || status === 502 ? (error?.message || 'Request failed') : 'An unexpected error occurred';
+  const code = status < 500 || status === 502 || status === 503 ? (error?.code || 'ERROR') : 'INTERNAL_ERROR';
+  const message = status < 500 || status === 502 || status === 503 ? (error?.message || 'Request failed') : 'An unexpected error occurred';
   if (status >= 500) {
     logger?.error?.(event, { requestId: req.id, errorType: error?.constructor?.name ?? 'Error' });
   }
@@ -108,6 +108,19 @@ export function createInboxRouter({ inboxService, logger } = {}) {
       return res.status(200).json(result);
     } catch (error) {
       return sendRouteError(req, res, error, logger, 'inbox_reply_failed');
+    }
+  });
+
+  router.post('/messages/:id/reply-retry', async (req, res) => {
+    try {
+      const result = await inboxService.retryReplyDelivery({
+        userId: req.userId,
+        id: req.params.id,
+        replyId: req.body?.replyId,
+      });
+      return res.status(200).json(result);
+    } catch (error) {
+      return sendRouteError(req, res, error, logger, 'inbox_reply_retry_failed');
     }
   });
 

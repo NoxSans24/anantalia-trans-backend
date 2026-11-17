@@ -10,8 +10,26 @@ function sendRouteError(req, res, error, logger, event) {
   return res.status(status).json({ error: { code, message } });
 }
 
-export function createPublicContentRouter({ contentService, settingsService, logger } = {}) {
+export function createPublicContentRouter({ contentService, settingsService, analyticsService, logger } = {}) {
   const router = express.Router();
+
+  router.post('/analytics/pageview', async (req, res) => {
+    try {
+      if (!analyticsService?.recordPageView) {
+        return res.status(202).json({ recorded: false, reason: 'analytics_unavailable' });
+      }
+      const dntHeader = req.get?.('dnt') === '1' || req.headers?.dnt === '1';
+      const result = await analyticsService.recordPageView({
+        path: req.body?.path,
+        visitorToken: req.body?.visitorToken,
+        userAgent: req.get?.('user-agent') || req.headers?.['user-agent'] || '',
+        dnt: dntHeader || req.body?.dnt === true,
+      });
+      return res.status(202).json(result);
+    } catch (error) {
+      return sendRouteError(req, res, error, logger, 'public_analytics_pageview_failed');
+    }
+  });
 
   router.get('/site-config', async (req, res) => {
     try {
@@ -36,6 +54,22 @@ export function createPublicContentRouter({ contentService, settingsService, log
       return res.status(200).json(result);
     } catch (error) {
       return sendRouteError(req, res, error, logger, 'public_content_list_failed');
+    }
+  });
+
+  router.get('/content-media/:mediaId', async (req, res) => {
+    try {
+      const media = await contentService.getPublicMediaById({ mediaId: req.params.mediaId });
+      if (media?.redirectUrl) {
+        return res.redirect(302, media.redirectUrl);
+      }
+      res.setHeader('Content-Type', media.mimeType);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'");
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.status(200).send(media.buffer);
+    } catch (error) {
+      return sendRouteError(req, res, error, logger, 'public_content_media_failed');
     }
   });
 

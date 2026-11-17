@@ -17,7 +17,11 @@ import { createContentService } from '../../src/content/content.service.js';
 import { createInMemoryContentRepository } from '../../src/content/in-memory-content.repository.js';
 import { createFinanceService } from '../../src/finance/finance.service.js';
 import { createInMemoryFinanceRepository } from '../../src/finance/in-memory-finance.repository.js';
+import { createPrismaFinanceRepository } from '../../src/finance/prisma-finance.repository.js';
 import { createSettingsService } from '../../src/settings/settings.service.js';
+import { createDashboardService } from '../../src/dashboard/dashboard.service.js';
+import { createBookingService } from '../../src/booking/booking.service.js';
+import { createAnalyticsService } from '../../src/analytics/analytics.service.js';
 
 async function withServer(app, run) {
   const server = app.listen(0, '127.0.0.1');
@@ -340,4 +344,337 @@ test('Bug 6, 7, 8, & 10: settingsRepository persists Inbox/Content across restar
   await settingsSvc.listActivityLogs({ userId: 'u-1', q: 'hendra' });
   assert.equal(capturedWhere.OR.some((clause) => clause.actor && typeof clause.actor === 'object' && 'contains' in clause.actor), false);
   assert.equal(capturedWhere.OR.some((clause) => Array.isArray(clause.actor?.in) && clause.actor.in[0] === '11111111-1111-4111-8111-111111111111'), true);
+});
+
+test('BUG-NEW-001, BUG-NEW-003 & BUG-NEW-005: dashboard underVerification count, slug-based pricing snapshot, and finance pendingInvoices', async () => {
+  // BUG-NEW-005: dashboard.service includes underVerification when repository.countBookings is present
+  const dashSvc = createDashboardService({
+    authorizationService: { requirePermission: async () => {} },
+    repository: {
+      countCategories: async () => 2,
+      countModels: async () => 5,
+      countRentalCapabilities: async () => 8,
+      countBookings: async (where = {}) => {
+        if (where.status === 'waiting_confirmation') return 3;
+        if (where.status === 'under_verification') return 2;
+        if (where.status === 'confirmed') return 4;
+        if (where.status === 'completed') return 6;
+        return 15;
+      },
+    },
+  });
+  const dashSummary = await dashSvc.getSummary({ actor: 'admin-1' });
+  assert.equal(dashSummary.summary.bookings.underVerification, 2);
+  assert.equal(dashSummary.summary.bookings.waitingConfirmation, 3);
+  assert.equal(dashSummary.summary.bookings.total, 15);
+
+  // BUG-NEW-001: booking.service matches PricingRule stored with model slug when booking uses model UUID
+  const savedBookings = [];
+  const modUuid = '00000000-0000-4000-8000-000000000022';
+  const catUuid = '00000000-0000-4000-8000-000000000011';
+  const bookingSvc = createBookingService({
+    repository: {
+      saveBooking: async (b) => { savedBookings.push(b); return b; },
+    },
+    fleetService: {
+      findModelForPublicBooking: async ({ modelId, categoryId, rentalType }) => (
+        modelId === modUuid && categoryId === catUuid && rentalType === 'with_driver'
+          ? { id: modUuid, slug: 'toyota-hiace-premio', categoryId: catUuid, name: 'Toyota Hiace Premio' }
+          : null
+      ),
+    },
+    pricingRepository: {
+      listPricing: async () => ({
+        items: [{ id: 'prc-1', modelId: 'toyota-hiace-premio', rentalType: 'with_driver', billingUnit: 'day', baseRate: 1400000, currency: 'IDR', isActive: true }],
+      }),
+    },
+    settingsRepository: createInMemorySettingsRepository(),
+  });
+  const bkRes = await bookingSvc.createPublicBookingRequest({
+    customerName: 'Rina Kusuma',
+    whatsappPhone: '+6281234567890',
+    categoryId: catUuid,
+    modelId: modUuid,
+    rentalType: 'with_driver',
+    startsOn: '2030-09-10',
+    endsOn: '2030-09-12',
+    pickupLocation: 'Stasiun Tugu Yogyakarta',
+  });
+  assert.equal(bkRes.priceSnapshot?.pricingRuleId, 'prc-1');
+  assert.equal(bkRes.priceSnapshot?.agreedRate, 1400000);
+  assert.equal(bkRes.priceSnapshot?.days, 3);
+  assert.equal(bkRes.priceSnapshot?.totalAmount, 4200000);
+
+  // BUG-NEW-003: prismaFinanceRepository.getSummary computes pendingInvoices from active unpaid bookings
+  const finRepo = createPrismaFinanceRepository({
+    financeTransaction: {
+      aggregate: async ({ where }) => ({ _sum: { amount: where.type === 'income' ? 1400000 : 0 } }),
+      count: async () => 1,
+      findMany: async () => [{ bookingId: 'bk-paid-1' }],
+    },
+    booking: {
+      findMany: async () => [
+        { id: 'bk-paid-1', bookingCode: 'BK-001' },
+        { id: 'bk-unpaid-2', bookingCode: 'BK-002' },
+        { id: 'bk-unpaid-3', bookingCode: 'BK-003' },
+      ],
+    },
+  });
+  const finSummary = await finRepo.getSummary({});
+  assert.equal(finSummary.pendingInvoices, 2);
+});
+
+test('Feature 3A: inbox reply email webhook handles empty config, success with secret header, 502/timeout failure, and safe retry', async () => {
+  const prevUrl = process.env.SMTP_WEBHOOK_URL;
+  const prevSecret = process.env.SMTP_WEBHOOK_SECRET;
+  const seedMsg = {
+    id: 'msg-email-1',
+    senderName: 'Budi',
+    senderEmail: 'budi@example.test',
+    subject: 'Tanya Hiace',
+    content: 'Mohon info sewa Hiace.',
+    status: 'unread',
+    createdAt: '2026-11-18T01:00:00.000Z',
+  };
+
+  try {
+    // 1. Empty config saves internally without claiming sent
+    delete process.env.SMTP_WEBHOOK_URL;
+    delete process.env.SMTP_WEBHOOK_SECRET;
+    const repoNoCfg = createInMemoryInboxRepository([{ ...seedMsg }]);
+    const svcNoCfg = createInboxService({ repository: repoNoCfg, settingsRepository: createInMemorySettingsRepository() });
+    const resNoCfg = await svcNoCfg.replyToMessage({
+      userId: 'admin-1',
+      id: 'msg-email-1',
+      input: { subject: 'Re: Tanya Hiace', body: 'Tersedia mulai Besok.' },
+    });
+    assert.equal(resNoCfg.emailConfigured, false);
+    assert.equal(resNoCfg.deliverySuccess, false);
+    assert.equal(resNoCfg.reply.deliveryStatus, 'smtp_not_configured');
+    assert.equal(resNoCfg.item.status, 'unread');
+
+    // 2. Failing HTTP 500 + timeout saves failed reply and allows retry when healthy
+    process.env.SMTP_WEBHOOK_URL = 'https://mailer.example.test/send';
+    process.env.SMTP_WEBHOOK_SECRET = 'secret-xyz';
+    let mode = 'http500';
+    const captured = [];
+    const mockFetch = async (url, init) => {
+      captured.push({ url, init });
+      if (mode === 'timeout') {
+        const e = new Error('Timed out');
+        e.name = 'TimeoutError';
+        throw e;
+      }
+      if (mode === 'http500') {
+        return new Response('err', { status: 500 });
+      }
+      return new Response('ok', { status: 200 });
+    };
+
+    const repoFail = createInMemoryInboxRepository([{ ...seedMsg }]);
+    const svcFail = createInboxService({ repository: repoFail, settingsRepository: createInMemorySettingsRepository(), fetchImpl: mockFetch });
+    const failRes = await svcFail.replyToMessage({
+      userId: 'admin-1',
+      id: 'msg-email-1',
+      input: { subject: 'Re: Hiace', body: 'Balasan pertama' },
+    });
+    assert.equal(failRes.deliverySuccess, false);
+    assert.equal(failRes.reply.deliveryStatus, 'failed');
+    assert.match(failRes.reply.deliveryError, /HTTP 500/);
+    assert.equal(failRes.item.status, 'unread');
+    assert.equal(captured[0].init.headers.Authorization, 'Bearer secret-xyz');
+    assert.equal(captured[0].init.headers['X-Webhook-Secret'], 'secret-xyz');
+
+    mode = 'timeout';
+    const timeoutRetry = await svcFail.retryReplyDelivery({ userId: 'admin-1', id: 'msg-email-1', replyId: failRes.reply.id });
+    assert.equal(timeoutRetry.deliverySuccess, false);
+    assert.equal(timeoutRetry.reply.deliveryStatus, 'failed');
+    assert.match(timeoutRetry.reply.deliveryError, /Timeout/i);
+    assert.equal(timeoutRetry.reply.attempts, 2);
+
+    mode = 'ok';
+    const okRetry = await svcFail.retryReplyDelivery({ userId: 'admin-1', id: 'msg-email-1', replyId: failRes.reply.id });
+    assert.equal(okRetry.deliverySuccess, true);
+    assert.equal(okRetry.reply.deliveryStatus, 'sent');
+    assert.equal(okRetry.reply.attempts, 3);
+    assert.equal(okRetry.item.status, 'replied');
+
+    // Duplicate retry guard after sent
+    await assert.rejects(
+      svcFail.retryReplyDelivery({ userId: 'admin-1', id: 'msg-email-1', replyId: failRes.reply.id }),
+      { code: 'ALREADY_SENT', status: 409 },
+    );
+  } finally {
+    if (prevUrl === undefined) delete process.env.SMTP_WEBHOOK_URL; else process.env.SMTP_WEBHOOK_URL = prevUrl;
+    if (prevSecret === undefined) delete process.env.SMTP_WEBHOOK_SECRET; else process.env.SMTP_WEBHOOK_SECRET = prevSecret;
+  }
+});
+
+test('Feature 3B: CMS image upload validates signature, extension, path safety, and optional object storage webhook', async () => {
+  const prevStorageUrl = process.env.OBJECT_STORAGE_UPLOAD_URL;
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00]);
+  const validPngB64 = `data:image/png;base64,${pngBytes.toString('base64')}`;
+
+  try {
+    delete process.env.OBJECT_STORAGE_UPLOAD_URL;
+    const settingsRepo = createInMemorySettingsRepository();
+    const contentSvc = createContentService({
+      repository: createInMemoryContentRepository(),
+      settingsRepository: settingsRepo,
+    });
+
+    // Reject path traversal
+    await assert.rejects(
+      contentSvc.uploadContentImage({ userId: 'admin-1', input: { fileName: '../evil.png', mimeType: 'image/png', dataBase64: validPngB64 } }),
+      { code: 'INVALID_FILE_NAME', status: 400 },
+    );
+    // Reject spoofed binary signature
+    await assert.rejects(
+      contentSvc.uploadContentImage({
+        userId: 'admin-1',
+        input: { fileName: 'hero.png', mimeType: 'image/png', dataBase64: Buffer.from('<?php echo 1; ?>').toString('base64') },
+      }),
+      { code: 'INVALID_IMAGE_SIGNATURE', status: 400 },
+    );
+    // Reject mismatched MIME/extension
+    await assert.rejects(
+      contentSvc.uploadContentImage({ userId: 'admin-1', input: { fileName: 'hero.jpg', mimeType: 'image/png', dataBase64: validPngB64 } }),
+      { code: 'INVALID_FILE_EXTENSION', status: 400 },
+    );
+    // Reject SVG
+    await assert.rejects(
+      contentSvc.uploadContentImage({ userId: 'admin-1', input: { fileName: 'hero.svg', mimeType: 'image/svg+xml', dataBase64: Buffer.from('<svg></svg>').toString('base64') } }),
+      { code: 'INVALID_MIME_TYPE', status: 400 },
+    );
+
+    // Valid PNG upload stored inline and served via getPublicMediaById
+    const uploaded = await contentSvc.uploadContentImage({
+      userId: 'admin-1',
+      input: { fileName: 'Banner Promo.PNG', mimeType: 'image/png', dataBase64: validPngB64 },
+    });
+    assert.equal(uploaded.storageMode, 'database_inline');
+    assert.match(uploaded.objectKey, /^cms-media\/[0-9a-f-]+\/banner-promo\.png$/);
+    const served = await contentSvc.getPublicMediaById({ mediaId: uploaded.mediaId });
+    assert.equal(served.mimeType, 'image/png');
+    assert.deepEqual(served.buffer, pngBytes);
+
+    // External object storage webhook success & failure
+    process.env.OBJECT_STORAGE_UPLOAD_URL = 'https://cdn-upload.example.test/put';
+    const extOkSvc = createContentService({
+      repository: createInMemoryContentRepository(),
+      settingsRepository: settingsRepo,
+      fetchImpl: async () => new Response(JSON.stringify({ publicUrl: 'https://cdn.example.test/banner.png', objectKey: 'custom/banner.png' }), { status: 200 }),
+    });
+    const extRes = await extOkSvc.uploadContentImage({
+      userId: 'admin-1',
+      input: { fileName: 'banner.png', mimeType: 'image/png', dataBase64: validPngB64 },
+    });
+    assert.equal(extRes.storageMode, 'external_object_storage');
+    assert.equal(extRes.imageUrl, 'https://cdn.example.test/banner.png');
+    assert.equal(extRes.objectKey, 'custom/banner.png');
+  } finally {
+    if (prevStorageUrl === undefined) delete process.env.OBJECT_STORAGE_UPLOAD_URL; else process.env.OBJECT_STORAGE_UPLOAD_URL = prevStorageUrl;
+  }
+});
+
+test('Feature 3C: public traffic analytics respects DNT/bots, deduplicates hits, and aggregates range counters', async () => {
+  const analyticsSvc = createAnalyticsService({ settingsRepository: createInMemorySettingsRepository() });
+  const t0 = new Date('2026-11-18T02:00:00.000Z');
+
+  assert.deepEqual(await analyticsSvc.recordPageView({ path: '/', dnt: true, now: t0 }), { recorded: false, reason: 'dnt_respected' });
+  assert.deepEqual(await analyticsSvc.recordPageView({ path: '/', userAgent: 'Googlebot/2.1', now: t0 }), { recorded: false, reason: 'bot_ignored' });
+  await assert.rejects(analyticsSvc.recordPageView({ path: 'invalid-path', now: t0 }), { code: 'INVALID_INPUT', status: 400 });
+
+  const h1 = await analyticsSvc.recordPageView({ path: '/pages/armada.html?q=hiace', visitorToken: 'vis-A', now: t0 });
+  assert.equal(h1.recorded, true);
+  assert.equal(h1.path, '/pages/armada.html');
+
+  // Rapid duplicate within < 5s suppressed
+  const hDup = await analyticsSvc.recordPageView({ path: '/pages/armada.html', visitorToken: 'vis-A', now: new Date(t0.getTime() + 1500) });
+  assert.deepEqual(hDup, { recorded: false, reason: 'deduplicated' });
+
+  // After 6s recorded again by same visitor -> 2 pageViews, still 1 uniqueVisitor
+  await analyticsSvc.recordPageView({ path: '/pages/armada.html', visitorToken: 'vis-A', now: new Date(t0.getTime() + 6000) });
+  // Different visitor 10 days ago (included in 30d, excluded in 7d)
+  await analyticsSvc.recordPageView({ path: '/', visitorToken: 'vis-B', now: new Date(t0.getTime() - 10 * 86_400_000) });
+
+  const over7d = await analyticsSvc.getOverview({ userId: 'admin-1', range: '7d', now: t0 });
+  assert.equal(over7d.traffic.pageViews, 2);
+  assert.equal(over7d.traffic.uniqueVisitors, 1);
+  assert.equal(over7d.traffic.trackerStatus, 'active_receiving');
+
+  const over30d = await analyticsSvc.getOverview({ userId: 'admin-1', range: '30d', now: t0 });
+  assert.equal(over30d.traffic.pageViews, 3);
+  assert.equal(over30d.traffic.uniqueVisitors, 2);
+});
+
+test('Feature 3D: myProfile email change OTP enforces SMTP check, uniqueness, attempt lock, one-time use, and no OTP log leak', async () => {
+  const prevUrl = process.env.SMTP_WEBHOOK_URL;
+  const user = { id: 'u-prof-1', email: 'old@example.test', username: 'prof1', displayName: 'Prof Satu', status: 'ACTIVE', deletedAt: null, roles: [] };
+  const otherUser = { id: 'u-prof-2', email: 'taken@example.test' };
+  const logs = [];
+  let sentOtpText = '';
+
+  const prisma = {
+    user: {
+      findUnique: async ({ where }) => {
+        if (where.id === user.id) return { ...user };
+        if (where.email === user.email) return { ...user };
+        if (where.email === otherUser.email) return { ...otherUser };
+        return null;
+      },
+      update: async ({ data }) => {
+        Object.assign(user, data);
+        return { ...user };
+      },
+    },
+    activityLog: { async create({ data }) { logs.push(data); return data; } },
+    async $transaction(cb) { return cb(prisma); },
+  };
+  const profileSvc = createMyProfileService({
+    prisma,
+    passwordService: { hash: async () => 'h' },
+    activityLog: { async log(entry) { logs.push(entry); } },
+    settingsRepository: createInMemorySettingsRepository(),
+    fetchImpl: async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      sentOtpText = payload.text;
+      return new Response('ok', { status: 200 });
+    },
+  });
+
+  try {
+    // 1. Without SMTP_WEBHOOK_URL -> fail closed
+    delete process.env.SMTP_WEBHOOK_URL;
+    await assert.rejects(profileSvc.requestEmailChange(user.id, { newEmail: 'new@example.test' }), { status: 'EMAIL_SERVICE_NOT_CONFIGURED' });
+    assert.equal(user.email, 'old@example.test');
+
+    // 2. Duplicate email -> PROFILE_VALUE_IN_USE
+    process.env.SMTP_WEBHOOK_URL = 'https://mailer.example.test/send';
+    await assert.rejects(profileSvc.requestEmailChange(user.id, { newEmail: 'taken@example.test' }), { status: 'PROFILE_VALUE_IN_USE' });
+
+    // 3. Request OTP succeeds, extract OTP from webhook payload, ensure logs never contain OTP
+    const reqRes = await profileSvc.requestEmailChange(user.id, { newEmail: 'new@example.test' });
+    assert.equal(reqRes.status, 'EMAIL_VERIFICATION_SENT');
+    const otpMatch = sentOtpText.match(/\b(\d{6})\b/);
+    assert.ok(otpMatch, 'OTP 6 digit must be sent to webhook');
+    const otp = otpMatch[1];
+    assert.equal(JSON.stringify(logs).includes(otp), false);
+
+    // 4. Wrong OTP -> invalid, then verify valid OTP succeeds & cannot be reused
+    const wrongOtp = otp === '000000' ? '111111' : '000000';
+    await assert.rejects(profileSvc.confirmEmailChange(user.id, { newEmail: 'new@example.test', code: wrongOtp }), { status: 'EMAIL_OTP_INVALID' });
+    const confirmed = await profileSvc.confirmEmailChange(user.id, { newEmail: 'new@example.test', code: otp });
+    assert.equal(confirmed.email, 'new@example.test');
+    await assert.rejects(profileSvc.confirmEmailChange(user.id, { newEmail: 'new@example.test', code: otp }), { status: 'EMAIL_OTP_EXPIRED_OR_INVALID' });
+
+    // 5. Brute-force 5 wrong attempts triggers lockout
+    await profileSvc.requestEmailChange(user.id, { newEmail: 'final@example.test' });
+    for (let i = 0; i < 4; i += 1) {
+      await assert.rejects(profileSvc.confirmEmailChange(user.id, { newEmail: 'final@example.test', code: '999999' }), { status: 'EMAIL_OTP_INVALID' });
+    }
+    await assert.rejects(profileSvc.confirmEmailChange(user.id, { newEmail: 'final@example.test', code: '999999' }), { status: 'EMAIL_OTP_MAX_ATTEMPTS' });
+  } finally {
+    if (prevUrl === undefined) delete process.env.SMTP_WEBHOOK_URL; else process.env.SMTP_WEBHOOK_URL = prevUrl;
+  }
 });

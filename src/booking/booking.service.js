@@ -111,7 +111,7 @@ export function createBookingService({ repository, authorizationService, activit
     return true;
   }
 
-  async function buildPriceSnapshot({ modelId, rentalType, startsOn, endsOn, existingSnapshot, lock = false }) {
+  async function buildPriceSnapshot({ modelId, modelSlug = null, rentalType, startsOn, endsOn, existingSnapshot, lock = false }) {
     if (existingSnapshot?.locked) {
       return existingSnapshot;
     }
@@ -132,9 +132,12 @@ export function createBookingService({ repository, authorizationService, activit
     const unitPriority = { day: 0, trip: 1, hour: 2 };
     validRules.sort((a, b) => (unitPriority[a.billingUnit] ?? 9) - (unitPriority[b.billingUnit] ?? 9));
 
+    const matchesModel = (ruleModelId) =>
+      ruleModelId === modelId || (modelSlug && ruleModelId === modelSlug);
+
     const matched =
-      validRules.find((r) => r.modelId === modelId && r.rentalType === rentalType) ||
-      validRules.find((r) => r.modelId === modelId) ||
+      validRules.find((r) => matchesModel(r.modelId) && r.rentalType === rentalType) ||
+      validRules.find((r) => matchesModel(r.modelId)) ||
       validRules.find((r) => !r.modelId && r.rentalType === rentalType);
 
     if (!matched) {
@@ -227,6 +230,7 @@ export function createBookingService({ repository, authorizationService, activit
       const cleanedModelId = modelId.trim();
 
       // If fleetService is available, verify that category and model exist and match
+      let resolvedModelSlug = null;
       if (fleetService?.findModelForPublicBooking) {
         const validModel = await fleetService.findModelForPublicBooking({
           modelId: cleanedModelId,
@@ -239,6 +243,7 @@ export function createBookingService({ repository, authorizationService, activit
           error.status = 422;
           throw error;
         }
+        resolvedModelSlug = validModel.slug ?? null;
       }
 
       if (repository?.findDuplicatePendingRequest) {
@@ -310,6 +315,7 @@ export function createBookingService({ repository, authorizationService, activit
 
       const priceSnapshot = await buildPriceSnapshot({
         modelId: cleanedModelId,
+        modelSlug: resolvedModelSlug,
         rentalType,
         startsOn,
         endsOn,
@@ -463,8 +469,18 @@ export function createBookingService({ repository, authorizationService, activit
 
       let priceSnapshot = await loadSnapshot(id);
       if (['confirmed', 'in_progress', 'completed'].includes(newStatus) && !priceSnapshot?.locked) {
+        let modelSlug = null;
+        if (fleetService?.findModelForPublicBooking && currentBooking.categoryId && currentBooking.modelId && currentBooking.rentalType) {
+          const matchedModel = await fleetService.findModelForPublicBooking({
+            modelId: currentBooking.modelId,
+            categoryId: currentBooking.categoryId,
+            rentalType: currentBooking.rentalType,
+          }).catch(() => null);
+          modelSlug = matchedModel?.slug ?? null;
+        }
         priceSnapshot = await buildPriceSnapshot({
           modelId: currentBooking.modelId,
+          modelSlug,
           rentalType: currentBooking.rentalType,
           startsOn: currentBooking.startsOn,
           endsOn: currentBooking.endsOn,
@@ -550,6 +566,7 @@ export function createBookingService({ repository, authorizationService, activit
       const nextCategoryId = patch.categoryId !== undefined ? String(patch.categoryId).trim() : currentBooking.categoryId;
       const nextModelId = patch.modelId !== undefined ? String(patch.modelId).trim() : currentBooking.modelId;
 
+      let updatedModelSlug = null;
       if (
         fleetService?.findModelForPublicBooking &&
         (nextModelId !== currentBooking.modelId || nextCategoryId !== currentBooking.categoryId || nextRentalType !== currentBooking.rentalType)
@@ -565,6 +582,14 @@ export function createBookingService({ repository, authorizationService, activit
           err.status = 422;
           throw err;
         }
+        updatedModelSlug = validModel.slug ?? null;
+      } else if (fleetService?.findModelForPublicBooking) {
+        const matchedModel = await fleetService.findModelForPublicBooking({
+          modelId: nextModelId,
+          categoryId: nextCategoryId,
+          rentalType: nextRentalType,
+        }).catch(() => null);
+        updatedModelSlug = matchedModel?.slug ?? null;
       }
 
       if (repository?.findOverlappingBooking) {
@@ -606,6 +631,7 @@ export function createBookingService({ repository, authorizationService, activit
       const existingSnapshot = await loadSnapshot(id);
       const nextSnapshot = await buildPriceSnapshot({
         modelId: nextModelId,
+        modelSlug: updatedModelSlug,
         rentalType: nextRentalType,
         startsOn: nextStartsOn,
         endsOn: nextEndsOn,
