@@ -34,7 +34,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   defaultTimezone: 'Asia/Jakarta',
   supportEmail: 'info@anantaliatrans.com',
   companyDescription: 'Layanan sewa bus pariwisata, hiace, dan armada premium Anatalia Trans.',
-  whatsappNumber: '6281234567890',
+  whatsappNumber: '6281383333707',
   websiteUrl: 'https://anantaliatrans.com',
   operatingDays: 'Senin - Minggu',
   holidays: 'Menyesuaikan jadwal operasional',
@@ -99,12 +99,18 @@ export function createSettingsService({ repository, authorizationService, activi
         }
       }
       const merged = { ...DEFAULT_SETTINGS, ...current };
+      const normalizedWa = String(merged.whatsappNumber || '').replace(/[^\d]/g, '');
+      const officialWa = !normalizedWa || normalizedWa === '6281234567890'
+        ? DEFAULT_SETTINGS.whatsappNumber
+        : normalizedWa.startsWith('0')
+          ? `62${normalizedWa.slice(1)}`
+          : normalizedWa;
       return {
         companyName: merged.companyName,
         companyDescription: merged.companyDescription,
         address: merged.address,
         officePhone: merged.officePhone,
-        whatsappNumber: merged.whatsappNumber,
+        whatsappNumber: officialWa,
         supportEmail: merged.supportEmail,
         businessHours: merged.businessHours,
         operatingDays: merged.operatingDays,

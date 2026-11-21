@@ -21,6 +21,9 @@ function booleanQuery(value) {
 
 function statusFor(error) {
   const status = error?.status ?? error?.code;
+  if (Number.isInteger(error?.status) && error.status >= 400 && error.status < 600) {
+    return [error.status, typeof error.code === 'string' ? error.code : 'INVALID_INPUT'];
+  }
   if (status === 'PERMISSION_DENIED') return [403, 'FORBIDDEN'];
   if (status === 'INVALID_INPUT') return [400, 'INVALID_INPUT'];
   if (status === 'CATEGORY_NOT_FOUND' || status === 'MODEL_NOT_FOUND' || status === 'UNIT_NOT_FOUND' || status === 'MAINTENANCE_NOT_FOUND') return [404, status === 'MODEL_NOT_FOUND' ? 'MODEL_NOT_FOUND' : 'NOT_FOUND'];
@@ -112,8 +115,13 @@ export function createFleetController({ fleetService, logger } = {}) {
     deactivateModel: handle(async (req, res) => {
       if (!authenticated(req, res)) return;
       if (!validId(req.params.id)) return res.status(400).json({ error: { code: 'INVALID_ID' }, requestId: req.id });
-      await fleetService.deactivateModel({ actor: req.userId, id: req.params.id });
-      return res.status(204).end();
+      const permanent = req.query.permanent === 'true';
+      const result = await fleetService.deactivateModel({ actor: req.userId, id: req.params.id, permanent });
+      return permanent ? res.status(200).json(result) : res.status(204).end();
+    }),
+    uploadModelImage: handle(async (req, res) => {
+      if (!authenticated(req, res)) return;
+      return res.status(201).json(await fleetService.uploadModelImage({ actor: req.userId, input: req.body }));
     }),
     listRentalOptions: handle(async (req, res) => {
       if (!authenticated(req, res)) return;
@@ -184,6 +192,31 @@ export function createFleetController({ fleetService, logger } = {}) {
       const paging = page(req.query);
       if (!paging) return res.status(400).json({ error: { code: 'INVALID_QUERY' }, requestId: req.id });
       return res.json(await fleetService.getPublicModels({ categoryId: req.query.categoryId, rentalType: req.query.rentalType, ...paging }));
+    }),
+    publicCatalog: handle(async (req, res) => {
+      const paging = page({ limit: req.query.limit ?? '100', offset: req.query.offset ?? '0' });
+      const q = safeQuery(req.query);
+      if (!paging || q === null || (req.query.categoryId !== undefined && req.query.categoryId !== '' && !validId(req.query.categoryId))) {
+        return res.status(400).json({ error: { code: 'INVALID_QUERY' }, requestId: req.id });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(await fleetService.getPublicCatalog({ categoryId: req.query.categoryId || undefined, q, ...paging }));
+    }),
+    publicModelDetail: handle(async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(await fleetService.getPublicModelDetail({ idOrSlug: req.params.idOrSlug }));
+    }),
+    publicModelMedia: handle(async (req, res) => {
+      const media = await fleetService.getPublicModelMedia({ mediaId: req.params.mediaId });
+      if (media?.redirectUrl) {
+        return res.redirect(302, media.redirectUrl);
+      }
+      res.setHeader('Content-Type', media.mimeType);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'");
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.status(200).send(media.buffer);
     }),
   });
 }

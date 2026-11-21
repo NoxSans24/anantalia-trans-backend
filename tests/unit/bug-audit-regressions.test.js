@@ -8,7 +8,7 @@ import { createAdminAccountRouter } from '../../src/routes/admin-account.routes.
 import { createMyProfileService } from '../../src/auth/my-profile-service.js';
 import { createFleetService } from '../../src/fleet/fleet.service.js';
 import { createFleetController } from '../../src/fleet/fleet.controller.js';
-import { createAdminFleetRouter } from '../../src/fleet/fleet.routes.js';
+import { createAdminFleetRouter, createPublicFleetRouter } from '../../src/fleet/fleet.routes.js';
 import { createInMemorySettingsRepository } from '../../src/settings/in-memory-settings.repository.js';
 import { createPrismaSettingsRepository } from '../../src/settings/prisma-settings.repository.js';
 import { createInboxService } from '../../src/inbox/inbox.service.js';
@@ -677,4 +677,254 @@ test('Feature 3D: myProfile email change OTP enforces SMTP check, uniqueness, at
   } finally {
     if (prevUrl === undefined) delete process.env.SMTP_WEBHOOK_URL; else process.env.SMTP_WEBHOOK_URL = prevUrl;
   }
+});
+
+test('Anatalia Fleet Integration: deleteModel (hard vs safe deactivate), photo upload + magic-byte validation + orphan cleanup, public catalog, and WhatsApp default', async () => {
+  const settingsRepo = createInMemorySettingsRepository();
+  const catId = '11111111-1111-4111-8111-111111111111';
+  const model1Id = '22222222-2222-4222-8222-222222222222';
+  const model2Id = '33333333-3333-4333-8333-333333333333';
+  const model3Id = '44444444-4444-4444-8444-444444444444';
+  const models = new Map([
+    [model1Id, {
+      id: model1Id,
+      categoryId: catId,
+      slug: 'toyota-avanza-g',
+      name: 'Toyota Avanza G',
+      description: 'MPV keluarga nyaman',
+      seatCount: 7,
+      publicSpecs: null,
+      isActive: true,
+      isVerified: true,
+      version: 1,
+      category: { id: catId, slug: 'mpv', name: 'MPV Keluarga' },
+      rentalOptions: [{ rentalType: 'with_driver', isEnabled: true }],
+    }],
+    [model2Id, {
+      id: model2Id,
+      categoryId: catId,
+      slug: 'toyota-hiace-premio',
+      name: 'Toyota Hiace Premio',
+      description: 'Minibus rombongan',
+      seatCount: 14,
+      publicSpecs: null,
+      isActive: true,
+      isVerified: true,
+      version: 1,
+      category: { id: catId, slug: 'mpv', name: 'MPV Keluarga' },
+      rentalOptions: [{ rentalType: 'with_driver', isEnabled: true }],
+    }],
+    [model3Id, {
+      id: model3Id,
+      categoryId: catId,
+      slug: 'draft-model',
+      name: 'Draft Model',
+      description: 'Belum terverifikasi',
+      seatCount: 5,
+      publicSpecs: null,
+      isActive: true,
+      isVerified: false,
+      version: 1,
+      category: { id: catId, slug: 'mpv', name: 'MPV Keluarga' },
+      rentalOptions: [{ rentalType: 'with_driver', isEnabled: true }],
+    }],
+  ]);
+  const logs = [];
+  const relationsByModel = new Map([
+    [model1Id, { unitCount: 0, bookingCount: 0, hasRelations: false }],
+    [model2Id, { unitCount: 2, bookingCount: 1, hasRelations: true }],
+  ]);
+
+  const repo = {
+    transaction: (work) => work(repo),
+    model: {
+      get: async (id) => (models.has(id) ? { ...models.get(id) } : null),
+      findBySlug: async (slug) => [...models.values()].find((m) => m.slug === slug) ?? null,
+      update: async (id, data) => {
+        const current = models.get(id);
+        const updated = { ...current, ...data, version: current.version + 1 };
+        models.set(id, updated);
+        return { ...updated };
+      },
+      disableAllRentalOptions: async (id) => {
+        const current = models.get(id);
+        if (current) {
+          current.rentalOptions = current.rentalOptions.map((o) => ({ ...o, isEnabled: false }));
+        }
+      },
+      hasRelations: async (id) => relationsByModel.get(id) ?? { unitCount: 0, bookingCount: 0 },
+      delete: async (id) => {
+        const existing = models.get(id);
+        models.delete(id);
+        return existing;
+      },
+      countUsingMedia: async (mediaId, excludeModelId) => {
+        let count = 0;
+        for (const m of models.values()) {
+          if (excludeModelId && m.id === excludeModelId) continue;
+          if (m.publicSpecs?.imageMediaId === mediaId) count += 1;
+        }
+        return count;
+      },
+    },
+    public: {
+      catalog: async ({ q } = {}) => {
+        const list = [...models.values()]
+          .filter((m) => m.isActive && m.isVerified && (!q || m.name.toLowerCase().includes(q.toLowerCase())));
+        return {
+          models: list,
+          total: list.length,
+          pricingRules: [
+            { id: 'pr-1', modelId: 'toyota-avanza-g', baseRate: 450000, currency: 'IDR', billingUnit: 'day', isActive: true },
+            { id: 'pr-2', modelId: model2Id, baseRate: 1200000, currency: 'IDR', billingUnit: 'day', isActive: true },
+          ],
+          units: [
+            { id: 'u-1', modelId: model1Id, status: 'available' },
+            { id: 'u-2', modelId: model1Id, status: 'in_use' },
+          ],
+        };
+      },
+      modelByIdOrSlug: async (idOrSlug) => {
+        const m = [...models.values()].find((item) => item.isActive && item.isVerified && (item.id === idOrSlug || item.slug === idOrSlug));
+        if (!m) return null;
+        return {
+          model: m,
+          pricingRules: [{ id: 'pr-1', modelId: m.slug, baseRate: 450000, currency: 'IDR', billingUnit: 'day', isActive: true }],
+          units: [{ id: 'u-1', modelId: m.id, status: 'available' }],
+        };
+      },
+    },
+  };
+
+  const fleetService = createFleetService({
+    repository: repo,
+    authorizationService: { requirePermission: async () => {}, hasPermission: async () => true },
+    activityLog: { log: async (entry) => { logs.push(entry); } },
+    settingsRepository: settingsRepo,
+  });
+
+  const app = createApp({
+    logger: createLogger(() => {}),
+    publicFleetRouter: createPublicFleetRouter({ fleetService, logger: createLogger(() => {}) }),
+    adminFleetRouter: createAdminFleetRouter({ fleetService, logger: createLogger(() => {}) }),
+    authenticationMiddleware: (req, _res, next) => { req.userId = 'admin-1'; next(); },
+    csrfMiddleware: { middleware: (_req, _res, next) => next(), guard: (_req, _res, next) => next() },
+  });
+
+  // Valid minimal PNG magic bytes
+  const validPngBase64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]).toString('base64');
+  // Fake PNG containing HTML/script bytes
+  const fakePngBase64 = Buffer.from('<script>alert(1)</script>').toString('base64');
+
+  await withServer(app, async (base) => {
+    // 1. Reject spoofed image magic bytes
+    const badMagic = await fetch(`${base}/api/v1/admin/vehicle-models/upload-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fileName: 'car.png', mimeType: 'image/png', dataBase64: fakePngBase64 }),
+    });
+    assert.equal(badMagic.status, 400);
+
+    // 2. Reject invalid extension / path traversal
+    const badPath = await fetch(`${base}/api/v1/admin/vehicle-models/upload-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fileName: '../evil.png', mimeType: 'image/png', dataBase64: validPngBase64 }),
+    });
+    assert.equal(badPath.status, 400);
+
+    // 3. Upload two valid PNG photos
+    const up1 = await fetch(`${base}/api/v1/admin/vehicle-models/upload-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fileName: 'avanza.png', mimeType: 'image/png', dataBase64: validPngBase64 }),
+    });
+    assert.equal(up1.status, 201);
+    const up1Body = await up1.json();
+    assert.match(up1Body.imageUrl, /^\/api\/v1\/public\/vehicle-media\//);
+
+    const up2 = await fetch(`${base}/api/v1/admin/vehicle-models/upload-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fileName: 'avanza-v2.png', mimeType: 'image/png', dataBase64: validPngBase64 }),
+    });
+    assert.equal(up2.status, 201);
+    const up2Body = await up2.json();
+
+    // 4. Attach photo 1 to model1 and verify serving headers
+    const patch1 = await fetch(`${base}/api/v1/admin/vehicle-models/${model1Id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicSpecs: { imageUrl: up1Body.imageUrl, imageMediaId: up1Body.mediaId, transmission: 'Otomatis' } }),
+    });
+    assert.equal(patch1.status, 200);
+
+    const mediaRes = await fetch(`${base}${up1Body.imageUrl}`);
+    assert.equal(mediaRes.status, 200);
+    assert.equal(mediaRes.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(mediaRes.headers.get('content-security-policy'), "default-src 'none'");
+
+    // 5. Replace photo 1 with photo 2 -> photo 1 orphan is automatically cleaned up
+    const patch2 = await fetch(`${base}/api/v1/admin/vehicle-models/${model1Id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publicSpecs: { imageUrl: up2Body.imageUrl, imageMediaId: up2Body.mediaId, transmission: 'Otomatis' } }),
+    });
+    assert.equal(patch2.status, 200);
+    const oldMediaRes = await fetch(`${base}${up1Body.imageUrl}`);
+    assert.equal(oldMediaRes.status, 404);
+
+    // 6. Public catalog exposes active+verified models with imageUrl & excludes unverified draft
+    const catRes = await fetch(`${base}/api/v1/public/fleet-catalog`);
+    assert.equal(catRes.status, 200);
+    const catBody = await catRes.json();
+    assert.equal(catBody.items.length, 2);
+    const avanzaPub = catBody.items.find((i) => i.id === model1Id);
+    assert.equal(avanzaPub.imageUrl, up2Body.imageUrl);
+    assert.equal(avanzaPub.startingPrice, 450000);
+    assert.equal(catBody.items.some((i) => i.id === model3Id), false);
+
+    // 7. Public model detail lookup by slug works
+    const detRes = await fetch(`${base}/api/v1/public/vehicle-models/toyota-avanza-g`);
+    assert.equal(detRes.status, 200);
+    const detBody = await detRes.json();
+    assert.equal(detBody.item.id, model1Id);
+    assert.equal(detBody.item.imageUrl, up2Body.imageUrl);
+
+    // 8. Permanent delete model1 (no relations) -> hard delete + cleans up photo 2 + hidden from public
+    const del1 = await fetch(`${base}/api/v1/admin/vehicle-models/${model1Id}?permanent=true`, { method: 'DELETE' });
+    assert.equal(del1.status, 200);
+    const del1Body = await del1.json();
+    assert.equal(del1Body.deleted, true);
+    assert.equal(del1Body.permanent, true);
+    assert.equal(models.has(model1Id), false);
+    const photo2AfterDelete = await fetch(`${base}${up2Body.imageUrl}`);
+    assert.equal(photo2AfterDelete.status, 404);
+    assert.equal(logs.some((l) => l.action === 'FLEET_MODEL_DELETED' && l.resourceId === model1Id), true);
+
+    // 9. Permanent delete model2 (has units/bookings) -> safe deactivation + hidden from public catalog
+    const del2 = await fetch(`${base}/api/v1/admin/vehicle-models/${model2Id}?permanent=true`, { method: 'DELETE' });
+    assert.equal(del2.status, 200);
+    const del2Body = await del2.json();
+    assert.equal(del2Body.deleted, false);
+    assert.equal(del2Body.deactivated, true);
+    assert.equal(models.get(model2Id).isActive, false);
+    assert.equal(models.get(model2Id).isVerified, false);
+
+    const catAfter = await fetch(`${base}/api/v1/public/fleet-catalog`);
+    const catAfterBody = await catAfter.json();
+    assert.equal(catAfterBody.items.length, 0);
+  });
+
+  // 10. SettingsService public site config defaults to official WA 6281383333707 and overrides legacy placeholder
+  const settingsSvc = createSettingsService({
+    repository: settingsRepo,
+    authorizationService: { hasPermission: async () => true },
+  });
+  const pubCfgDefault = await settingsSvc.getPublicSiteConfig();
+  assert.equal(pubCfgDefault.whatsappNumber, '6281383333707');
+
+  await settingsRepo.upsertSetting('whatsappNumber', '6281234567890');
+  const pubCfgSanitized = await settingsSvc.getPublicSiteConfig();
+  assert.equal(pubCfgSanitized.whatsappNumber, '6281383333707');
 });

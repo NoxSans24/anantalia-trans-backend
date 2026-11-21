@@ -42,6 +42,7 @@ export function createApp({
     next();
   });
   app.use('/api/v1/admin/content/upload-image', express.json({ limit: '3mb' }));
+  app.use('/api/v1/admin/vehicle-models/upload-image', express.json({ limit: '3mb' }));
   app.use('/api/me/meta', express.json({ limit: '500kb' }));
   app.use(express.json({ limit: '100kb' }));
   app.use((req, res, next) => {

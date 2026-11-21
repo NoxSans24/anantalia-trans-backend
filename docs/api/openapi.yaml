@@ -48,6 +48,46 @@ paths:
       responses:
         '200': { description: Public model allowlist; excludes units, prices, and availability }
         '400': { description: Invalid query }
+  /api/v1/public/fleet-catalog:
+    get:
+      summary: List active & verified public fleet catalog enriched with photo, description, specs, starting price, and unit availability
+      parameters:
+        - in: query
+          name: categoryId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: q
+          schema: { type: string, maxLength: 100 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200': { description: Public fleet catalog items }
+  /api/v1/public/vehicle-models/{idOrSlug}:
+    get:
+      summary: Get single active & verified public vehicle model detail by UUID or slug
+      parameters:
+        - in: path
+          name: idOrSlug
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Public vehicle model detail }
+        '404': { description: Model not found or not published }
+  /api/v1/public/vehicle-media/{mediaId}:
+    get:
+      summary: Serve uploaded vehicle model photo binary with non-executable headers
+      parameters:
+        - in: path
+          name: mediaId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Binary image (PNG, JPEG, or WebP) }
+        '404': { description: Media not found }
   /api/v1/admin/vehicle-categories:
     get:
       summary: Search and page vehicle categories
@@ -149,6 +189,25 @@ paths:
         '400': { description: Invalid model }
         '404': { description: Active category not found }
         '409': { description: Slug already exists }
+  /api/v1/admin/vehicle-models/upload-image:
+    post:
+      summary: Upload a vehicle model photo (PNG, JPEG, or WebP) with magic-byte validation
+      security: [{ sessionCookie: [], csrfCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileName, mimeType, dataBase64]
+              properties:
+                fileName: { type: string }
+                mimeType: { type: string, enum: [image/png, image/jpeg, image/webp] }
+                dataBase64: { type: string }
+      responses:
+        '201': { description: Uploaded image metadata and public URL; requires FLEET_CREATE or FLEET_UPDATE }
+        '400': { description: Invalid image format, extension, or magic bytes }
+        '413': { description: Image exceeds maximum size limit }
   /api/v1/admin/vehicle-models/{id}:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
@@ -182,10 +241,15 @@ paths:
         '403': { description: Required permission is missing }
         '409': { description: Slug already exists }
     delete:
-      summary: Soft-deactivate a model
+      summary: Deactivate or permanently delete a model (hard delete when ?permanent=true and no unit/booking relations exist; otherwise safe deactivation)
       security: [{ sessionCookie: [], csrfCookie: [] }]
+      parameters:
+        - in: query
+          name: permanent
+          schema: { type: boolean, default: false }
       responses:
-        '204': { description: Model deactivated; requires FLEET_DELETE }
+        '200': { description: Deletion or safe-deactivation result when permanent=true; requires FLEET_DELETE }
+        '204': { description: Model deactivated when permanent=false; requires FLEET_DELETE }
   /api/v1/admin/vehicle-models/{id}/rental-options:
     get:
       summary: List the supported rental options for a model

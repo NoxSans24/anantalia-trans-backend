@@ -7,6 +7,9 @@ export function createPublicFleetRouter({ fleetService, logger } = {}) {
   router.get('/rental-types', controller.publicRentalTypes);
   router.get('/vehicle-categories', controller.publicCategories);
   router.get('/vehicle-models', controller.publicModels);
+  router.get('/vehicle-models/:idOrSlug', controller.publicModelDetail);
+  router.get('/fleet-catalog', controller.publicCatalog);
+  router.get('/vehicle-media/:mediaId', controller.publicModelMedia);
   return router;
 }
 
@@ -20,6 +23,7 @@ export function createAdminFleetRouter({ fleetService, logger } = {}) {
   router.delete('/vehicle-categories/:id', controller.deactivateCategory);
   router.get('/vehicle-models', controller.listModels);
   router.post('/vehicle-models', controller.createModel);
+  router.post('/vehicle-models/upload-image', controller.uploadModelImage);
   router.get('/vehicle-models/:id', controller.getModel);
   router.patch('/vehicle-models/:id', controller.updateModel);
   router.delete('/vehicle-models/:id', controller.deactivateModel);

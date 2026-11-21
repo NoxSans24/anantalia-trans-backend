@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { validateImageUpload, uploadToExternalObjectStorage } from '../lib/image-upload.js';
 
 const rentalTypes = new Set(['self_drive', 'with_driver']);
 const unitStatuses = new Set(['available', 'in_use', 'maintenance', 'inactive']);
@@ -38,14 +39,62 @@ function validateDescription(value) {
 function validateSpecs(value) {
   if (value !== null && (typeof value !== 'object' || Array.isArray(value))) reject('INVALID_INPUT');
   if (value && Buffer.byteLength(JSON.stringify(value), 'utf8') > 5000) reject('INVALID_INPUT');
+  if (value && value.imageUrl !== undefined && value.imageUrl !== null && value.imageUrl !== '') {
+    if (typeof value.imageUrl !== 'string' || !/^(https?:\/\/|\/)/i.test(value.imageUrl.trim())) {
+      reject('INVALID_INPUT', 'URL foto model tidak valid.');
+    }
+  }
   return value;
+}
+function extractMediaIdFromSpecs(specs) {
+  if (!specs || typeof specs !== 'object') return null;
+  if (typeof specs.imageMediaId === 'string' && uuidPattern.test(specs.imageMediaId)) {
+    return specs.imageMediaId;
+  }
+  if (typeof specs.imageUrl === 'string') {
+    const match = specs.imageUrl.match(/\/api\/v1\/public\/vehicle-media\/([0-9a-f-]{36})/i);
+    if (match && uuidPattern.test(match[1])) return match[1];
+  }
+  return null;
 }
 function changed(keys) { return { changedFields: keys }; }
 
-export function createFleetService({ repository, authorizationService, activityLog, settingsRepository } = {}) {
+export function createFleetService({ repository, authorizationService, activityLog, settingsRepository, fetchImpl = globalThis.fetch } = {}) {
   if (!repository || !authorizationService || !activityLog) throw new TypeError('All fleet service dependencies are required');
   const requirePermission = (actor, permission) => authorizationService.requirePermission(actor, permission);
   let fallbackUnits = [];
+  const localMediaStore = new Map();
+
+  async function readFleetMedia(mediaId) {
+    if (settingsRepository?.get) {
+      const raw = await settingsRepository.get(`fleet_media:${mediaId}`).catch(() => null);
+      if (typeof raw === 'string' && raw.trim()) {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
+      }
+    }
+    return localMediaStore.get(mediaId) ?? null;
+  }
+
+  async function writeFleetMedia(mediaId, record) {
+    if (record) localMediaStore.set(mediaId, record);
+    else localMediaStore.delete(mediaId);
+    if (settingsRepository?.set) {
+      await settingsRepository.set(`fleet_media:${mediaId}`, record ? JSON.stringify(record) : '').catch(() => {});
+    }
+  }
+
+  async function cleanupOrphanFleetMedia(mediaId, excludeModelId = null) {
+    if (!mediaId || !uuidPattern.test(mediaId)) return;
+    if (typeof repository.model?.countUsingMedia === 'function') {
+      const usageCount = await repository.model.countUsingMedia(mediaId, excludeModelId).catch(() => 1);
+      if (usageCount > 0) return;
+    }
+    await writeFleetMedia(mediaId, null);
+  }
 
   async function loadUnits() {
     if (settingsRepository?.get) {
@@ -178,7 +227,12 @@ export function createFleetService({ repository, authorizationService, activityL
     }
     if (!Object.keys(data).length) reject('INVALID_INPUT');
     if (Object.hasOwn(data, 'isVerified')) await requirePermission(actor, 'FLEET_APPROVE');
-    return repository.transaction(async (tx) => {
+    let prevMediaId = null;
+    const updated = await repository.transaction(async (tx) => {
+      if (data.publicSpecs !== undefined && typeof tx.model.get === 'function') {
+        const existingModel = await tx.model.get(id);
+        prevMediaId = extractMediaIdFromSpecs(existingModel?.publicSpecs);
+      }
       if (data.categoryId) {
         const category = await tx.category.get(data.categoryId);
         if (!category || !category.isActive) reject('CATEGORY_NOT_FOUND');
@@ -187,15 +241,165 @@ export function createFleetService({ repository, authorizationService, activityL
       await activityLog.log({ actor, action: data.isVerified === undefined ? 'FLEET_MODEL_UPDATED' : 'FLEET_MODEL_VERIFICATION_CHANGED', resourceType: 'VehicleModel', resourceId: id, details: changed(Object.keys(data)), client: tx });
       return item;
     });
+    if (data.publicSpecs !== undefined && prevMediaId) {
+      const nextMediaId = extractMediaIdFromSpecs(updated?.publicSpecs);
+      if (nextMediaId !== prevMediaId) {
+        await cleanupOrphanFleetMedia(prevMediaId, id);
+      }
+    }
+    return updated;
   }
 
-  async function deactivateModel({ actor, id }) {
+  async function deactivateModel({ actor, id, permanent = false }) {
     await requirePermission(actor, 'FLEET_DELETE');
-    return repository.transaction(async (tx) => {
-      const item = await tx.model.update(id, { isActive: false });
-      await activityLog.log({ actor, action: 'FLEET_MODEL_DEACTIVATED', resourceType: 'VehicleModel', resourceId: id, client: tx });
-      return item;
+    if (!permanent) {
+      return repository.transaction(async (tx) => {
+        const item = await tx.model.update(id, { isActive: false });
+        await activityLog.log({ actor, action: 'FLEET_MODEL_DEACTIVATED', resourceType: 'VehicleModel', resourceId: id, client: tx });
+        return item;
+      });
+    }
+
+    let orphanMediaId = null;
+    const outcome = await repository.transaction(async (tx) => {
+      const existing = typeof tx.model.get === 'function' ? await tx.model.get(id) : null;
+      if (!existing) reject('MODEL_NOT_FOUND', 'Model armada tidak ditemukan.');
+
+      const relations = typeof tx.model.hasRelations === 'function'
+        ? await tx.model.hasRelations(id, existing.slug)
+        : { unitCount: 0, bookingCount: 0, hasRelations: false };
+
+      if (relations.hasRelations || Number(relations.unitCount) > 0 || Number(relations.bookingCount) > 0) {
+        if (typeof tx.model.disableAllRentalOptions === 'function') {
+          await tx.model.disableAllRentalOptions(id);
+        }
+        const deactivatedItem = await tx.model.update(id, { isActive: false, isVerified: false });
+        await activityLog.log({
+          actor,
+          action: 'FLEET_MODEL_DEACTIVATED',
+          resourceType: 'VehicleModel',
+          resourceId: id,
+          details: { reason: 'HAS_RELATIONS', unitCount: relations.unitCount, bookingCount: relations.bookingCount },
+          client: tx,
+        });
+        return {
+          deleted: false,
+          deactivated: true,
+          permanent: false,
+          reason: 'Model masih memiliki riwayat unit fisik atau pemesanan, sehingga dinonaktifkan dan disembunyikan dari katalog publik.',
+          item: deactivatedItem,
+        };
+      }
+
+      orphanMediaId = extractMediaIdFromSpecs(existing.publicSpecs);
+      if (typeof tx.model.delete === 'function') {
+        await tx.model.delete(id);
+      } else {
+        await tx.model.update(id, { isActive: false, isVerified: false });
+      }
+      await activityLog.log({
+        actor,
+        action: 'FLEET_MODEL_DELETED',
+        resourceType: 'VehicleModel',
+        resourceId: id,
+        details: { slug: existing.slug, name: existing.name },
+        client: tx,
+      });
+      return { deleted: true, deactivated: false, permanent: true, id };
     });
+
+    if (outcome.deleted && orphanMediaId) {
+      await cleanupOrphanFleetMedia(orphanMediaId, id);
+    }
+    return outcome;
+  }
+
+  async function uploadModelImage({ actor, input = {} } = {}) {
+    try {
+      await requirePermission(actor, 'FLEET_UPDATE');
+    } catch {
+      await requirePermission(actor, 'FLEET_CREATE');
+    }
+
+    const externalUrlRaw = (process.env.OBJECT_STORAGE_UPLOAD_URL || process.env.CMS_STORAGE_WEBHOOK_URL || '').trim();
+    const maxBytes = externalUrlRaw ? 2 * 1024 * 1024 : 524288;
+    const { safeName, mimeType, cleanBase64, bytes } = validateImageUpload({
+      fileName: input?.fileName,
+      mimeType: input?.mimeType,
+      dataBase64: input?.dataBase64,
+      maxBytes,
+    });
+
+    const mediaId = randomUUID();
+    let objectKey = `fleet-media/${mediaId}/${safeName}`;
+    let externalImageUrl = null;
+
+    if (externalUrlRaw) {
+      const uploaded = await uploadToExternalObjectStorage({
+        externalUrlRaw,
+        token: (process.env.OBJECT_STORAGE_TOKEN || process.env.CMS_STORAGE_TOKEN || '').trim(),
+        objectKey,
+        safeName,
+        mimeType,
+        bytes,
+        cleanBase64,
+        fetchImpl,
+      });
+      externalImageUrl = uploaded.externalImageUrl;
+      objectKey = uploaded.objectKey;
+    }
+
+    const mediaUrl = `/api/v1/public/vehicle-media/${mediaId}`;
+    const record = {
+      mediaId,
+      objectKey,
+      fileName: safeName,
+      mimeType,
+      sizeBytes: bytes.length,
+      storageMode: externalUrlRaw ? 'external_object_storage' : 'database_inline',
+      externalUrl: externalImageUrl,
+      dataBase64: externalUrlRaw ? null : cleanBase64,
+      createdAt: new Date().toISOString(),
+      createdBy: actor || 'admin',
+    };
+    await writeFleetMedia(mediaId, record);
+
+    await activityLog.log({
+      actor,
+      action: 'FLEET_MODEL_IMAGE_UPLOADED',
+      resourceType: 'VehicleMedia',
+      resourceId: mediaId,
+      details: { objectKey, mimeType, sizeBytes: bytes.length, storageMode: record.storageMode },
+    }).catch(() => {});
+
+    return {
+      mediaId,
+      objectKey,
+      fileName: safeName,
+      mimeType,
+      sizeBytes: bytes.length,
+      mediaUrl,
+      imageUrl: externalImageUrl || mediaUrl,
+      storageMode: record.storageMode,
+      externalStorageConfigured: Boolean(externalUrlRaw),
+    };
+  }
+
+  async function getPublicModelMedia({ mediaId } = {}) {
+    if (typeof mediaId !== 'string' || !uuidPattern.test(mediaId.trim())) {
+      reject('MODEL_NOT_FOUND', 'Media foto armada tidak ditemukan.');
+    }
+    const record = await readFleetMedia(mediaId.trim());
+    if (!record) reject('MODEL_NOT_FOUND', 'Media foto armada tidak ditemukan.');
+    if (record.externalUrl) return { redirectUrl: record.externalUrl };
+    if (typeof record.dataBase64 === 'string' && record.dataBase64.length > 0) {
+      return {
+        mimeType: record.mimeType || 'image/jpeg',
+        fileName: record.fileName || 'vehicle-image',
+        buffer: Buffer.from(record.dataBase64, 'base64'),
+      };
+    }
+    reject('MODEL_NOT_FOUND', 'Media foto armada tidak ditemukan.');
   }
 
   async function listRentalOptions({ actor, modelId }) {
@@ -228,11 +432,91 @@ export function createFleetService({ repository, authorizationService, activityL
     if (!rentalTypes.has(rentalType)) reject('INVALID_INPUT');
     return { items: await repository.public.categories(rentalType) };
   }
+  function formatPublicCatalogModel(model, pricingRules = [], units = []) {
+    const specs = model.publicSpecs && typeof model.publicSpecs === 'object' ? model.publicSpecs : {};
+    const idLower = String(model.id || '').toLowerCase();
+    const slugLower = String(model.slug || '').toLowerCase();
+    const matchingRules = pricingRules.filter((rule) => {
+      if (rule.isActive === false) return false;
+      const target = String(rule.modelId || '').trim().toLowerCase();
+      return target === idLower || (slugLower && target === slugLower);
+    });
+    const lowestRule = matchingRules.sort((a, b) => Number(a.baseRate || 0) - Number(b.baseRate || 0))[0] ?? null;
+    const modelUnits = units.filter((u) => u.modelId === model.id || !u.modelId);
+    const availableUnits = modelUnits.filter((u) => u.status === 'available').length;
+    const totalUnits = modelUnits.length;
+    const startingPrice = lowestRule?.baseRate
+      ? Number(lowestRule.baseRate)
+      : Number(specs.startingPrice) > 0
+        ? Number(specs.startingPrice)
+        : null;
+
+    return {
+      id: model.id,
+      slug: model.slug,
+      categoryId: model.categoryId,
+      category: model.category?.name ?? '',
+      categorySlug: model.category?.slug ?? '',
+      name: model.name,
+      description: model.description ?? null,
+      seatCount: model.seatCount ?? null,
+      imageUrl: typeof specs.imageUrl === 'string' && specs.imageUrl.trim() ? specs.imageUrl.trim() : null,
+      publicSpecs: Object.keys(specs).length ? specs : null,
+      rentalTypes: (model.rentalOptions ?? []).map((o) => o.rentalType),
+      startingPrice,
+      currency: lowestRule?.currency || 'IDR',
+      billingUnit: lowestRule?.billingUnit || 'day',
+      availableUnits,
+      totalUnits,
+      availabilityStatus: totalUnits > 0 ? (availableUnits > 0 ? 'available' : 'in_use') : 'on_request',
+    };
+  }
+
   async function getPublicModels({ categoryId, rentalType, limit = 25, offset = 0 }) {
     if (!uuidPattern.test(categoryId ?? '') || !rentalTypes.has(rentalType)) reject('INVALID_INPUT');
     const where = publicWhere(categoryId, rentalType);
     const [records, total] = await Promise.all([repository.public.models(where, limit, offset), repository.public.modelCount(where)]);
-    return { items: records.map(({ rentalOptions, ...model }) => ({ ...model, rentalType: rentalOptions[0]?.rentalType })), page: { limit, offset, total } };
+    return {
+      items: records.map(({ rentalOptions, ...model }) => {
+        const specs = model.publicSpecs && typeof model.publicSpecs === 'object' ? model.publicSpecs : null;
+        return {
+          ...model,
+          ...(specs?.imageUrl ? { imageUrl: specs.imageUrl } : {}),
+          rentalType: rentalOptions[0]?.rentalType,
+        };
+      }),
+      page: { limit, offset, total },
+    };
+  }
+
+  async function getPublicCatalog({ categoryId, q = '', limit = 100, offset = 0 } = {}) {
+    if (categoryId && !uuidPattern.test(categoryId)) reject('INVALID_INPUT');
+    const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 100);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
+    if (typeof repository.public?.catalog === 'function') {
+      const { models = [], total = 0, pricingRules = [], units = [] } = await repository.public.catalog({
+        categoryId: categoryId || undefined,
+        q: typeof q === 'string' ? q.trim() : '',
+        limit: safeLimit,
+        offset: safeOffset,
+      });
+      return {
+        items: models.map((model) => formatPublicCatalogModel(model, pricingRules, units.filter((u) => u.modelId === model.id))),
+        page: { limit: safeLimit, offset: safeOffset, total },
+      };
+    }
+    return { items: [], page: { limit: safeLimit, offset: safeOffset, total: 0 } };
+  }
+
+  async function getPublicModelDetail({ idOrSlug } = {}) {
+    const raw = typeof idOrSlug === 'string' ? idOrSlug.trim() : '';
+    if (!raw || raw.length > 150) reject('INVALID_INPUT');
+    const isUuid = uuidPattern.test(raw);
+    if (!isUuid && !slugPattern.test(raw.toLowerCase())) reject('INVALID_INPUT');
+    if (typeof repository.public?.modelByIdOrSlug !== 'function') reject('MODEL_NOT_FOUND');
+    const result = await repository.public.modelByIdOrSlug(isUuid ? raw : raw.toLowerCase(), isUuid);
+    if (!result?.model) reject('MODEL_NOT_FOUND', 'Model armada tidak ditemukan atau tidak aktif.');
+    return { item: formatPublicCatalogModel(result.model, result.pricingRules || [], result.units || []) };
   }
 
   async function findModelForPublicBooking({ modelId, categoryId, rentalType } = {}) {
@@ -581,5 +865,5 @@ export function createFleetService({ repository, authorizationService, activityL
     });
   }
 
-  return Object.freeze({ listCategories, getCategory, createCategory, updateCategory, deactivateCategory, listModels, getModel, createModel, updateModel, deactivateModel, listRentalOptions, setRentalOption, listVehicleUnits, getVehicleUnit, createVehicleUnit, updateVehicleUnit, deleteVehicleUnit, listUnitMaintenances, createUnitMaintenance, updateUnitMaintenance, getPublicRentalTypes, getPublicCategories, getPublicModels, findModelForPublicBooking });
+  return Object.freeze({ listCategories, getCategory, createCategory, updateCategory, deactivateCategory, listModels, getModel, createModel, updateModel, deactivateModel, deleteModel: (args) => deactivateModel({ ...args, permanent: true }), uploadModelImage, getPublicModelMedia, listRentalOptions, setRentalOption, listVehicleUnits, getVehicleUnit, createVehicleUnit, updateVehicleUnit, deleteVehicleUnit, listUnitMaintenances, createUnitMaintenance, updateUnitMaintenance, getPublicRentalTypes, getPublicCategories, getPublicModels, getPublicCatalog, getPublicModelDetail, findModelForPublicBooking });
 }

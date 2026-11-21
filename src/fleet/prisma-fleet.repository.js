@@ -18,6 +18,35 @@ export function createPrismaFleetRepository(prisma) {
       create: (data) => prisma.vehicleModel.create({ data, include: { category: true } }),
       update: (id, data) => prisma.vehicleModel.update({ where: { id }, data, include: { category: true, rentalOptions: { orderBy: { rentalType: 'asc' } } } }),
       createOptions: (modelId) => prisma.vehicleRentalOption.createMany({ data: ['self_drive', 'with_driver'].map((rentalType) => ({ modelId, rentalType, isEnabled: false })) }),
+      disableAllRentalOptions: (modelId) => prisma.vehicleRentalOption.updateMany({ where: { modelId }, data: { isEnabled: false } }),
+      hasRelations: async (id, slug = null) => {
+        const unitCount = typeof prisma.vehicleUnit?.count === 'function'
+          ? await prisma.vehicleUnit.count({ where: { modelId: id } })
+          : 0;
+        const bookingCount = typeof prisma.booking?.count === 'function'
+          ? await prisma.booking.count({
+              where: {
+                OR: [{ modelId: id }, ...(slug ? [{ modelId: slug }] : [])],
+              },
+            })
+          : 0;
+        return { unitCount, bookingCount, hasRelations: unitCount + bookingCount > 0 };
+      },
+      delete: async (id) => {
+        await prisma.vehicleRentalOption.deleteMany({ where: { modelId: id } });
+        return prisma.vehicleModel.delete({ where: { id } });
+      },
+      countUsingMedia: async (mediaId, excludeModelId = null) => {
+        if (!mediaId || typeof prisma.vehicleModel?.findMany !== 'function') return 0;
+        const rows = await prisma.vehicleModel.findMany({
+          where: excludeModelId ? { id: { not: excludeModelId } } : {},
+          select: { id: true, publicSpecs: true },
+        });
+        return rows.filter((row) => {
+          const specs = row.publicSpecs && typeof row.publicSpecs === 'object' ? row.publicSpecs : null;
+          return specs && (specs.imageMediaId === mediaId || String(specs.imageUrl || '').includes(mediaId));
+        }).length;
+      },
     },
     rentalOption: {
       upsert: (modelId, rentalType, data) => prisma.vehicleRentalOption.upsert({
@@ -108,11 +137,76 @@ export function createPrismaFleetRepository(prisma) {
         const rentalType = where?.rentalOptions?.some?.rentalType;
         return prisma.vehicleModel.findMany({
           where,
-          select: { id: true, slug: true, categoryId: true, name: true, seatCount: true, rentalOptions: { where: { ...(rentalType ? { rentalType } : {}), isEnabled: true }, select: { rentalType: true } } },
-          orderBy: { name: 'asc' }, take, skip,
+          select: {
+            id: true,
+            slug: true,
+            categoryId: true,
+            name: true,
+            description: true,
+            seatCount: true,
+            publicSpecs: true,
+            rentalOptions: { where: { ...(rentalType ? { rentalType } : {}), isEnabled: true }, select: { rentalType: true } },
+          },
+          orderBy: { name: 'asc' },
+          take,
+          skip,
         });
       },
       modelCount: (where) => prisma.vehicleModel.count({ where }),
+      catalog: async ({ categoryId, q, limit = 100, offset = 0 } = {}) => {
+        const where = {
+          isActive: true,
+          isVerified: true,
+          category: { isActive: true },
+          ...(categoryId ? { categoryId } : {}),
+          ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { slug: { contains: q, mode: 'insensitive' } }] } : {}),
+        };
+        const [models, total, pricingRules, units] = await Promise.all([
+          prisma.vehicleModel.findMany({
+            where,
+            include: {
+              category: { select: { id: true, slug: true, name: true, sortOrder: true } },
+              rentalOptions: { where: { isEnabled: true }, select: { rentalType: true }, orderBy: { rentalType: 'asc' } },
+            },
+            orderBy: [{ category: { sortOrder: 'asc' } }, { name: 'asc' }],
+            take: limit,
+            skip: offset,
+          }),
+          prisma.vehicleModel.count({ where }),
+          typeof prisma.pricingRule?.findMany === 'function'
+            ? prisma.pricingRule.findMany({ where: { isActive: true }, orderBy: { baseRate: 'asc' } })
+            : Promise.resolve([]),
+          typeof prisma.vehicleUnit?.findMany === 'function'
+            ? prisma.vehicleUnit.findMany({ where: { isActive: true }, select: { modelId: true, status: true } })
+            : Promise.resolve([]),
+        ]);
+        return { models, total, pricingRules, units };
+      },
+      modelByIdOrSlug: async (idOrSlug, isUuid) => {
+        const where = isUuid
+          ? { id: idOrSlug, isActive: true, isVerified: true, category: { isActive: true } }
+          : { slug: idOrSlug, isActive: true, isVerified: true, category: { isActive: true } };
+        const model = await prisma.vehicleModel.findFirst({
+          where,
+          include: {
+            category: { select: { id: true, slug: true, name: true } },
+            rentalOptions: { where: { isEnabled: true }, select: { rentalType: true }, orderBy: { rentalType: 'asc' } },
+          },
+        });
+        if (!model) return null;
+        const [pricingRules, units] = await Promise.all([
+          typeof prisma.pricingRule?.findMany === 'function'
+            ? prisma.pricingRule.findMany({
+                where: { isActive: true, modelId: { in: [model.id, model.slug] } },
+                orderBy: { baseRate: 'asc' },
+              })
+            : Promise.resolve([]),
+          typeof prisma.vehicleUnit?.findMany === 'function'
+            ? prisma.vehicleUnit.findMany({ where: { modelId: model.id, isActive: true }, select: { status: true } })
+            : Promise.resolve([]),
+        ]);
+        return { model, pricingRules, units };
+      },
     },
   });
 }
