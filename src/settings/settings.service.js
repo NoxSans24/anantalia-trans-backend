@@ -8,6 +8,8 @@ const ALLOWED_SETTING_KEYS = new Set([
   'supportEmail',
   'companyDescription',
   'whatsappNumber',
+  'instagramUrl',
+  'tiktokUrl',
   'websiteUrl',
   'operatingDays',
   'holidays',
@@ -32,9 +34,11 @@ const DEFAULT_SETTINGS = Object.freeze({
   businessHours: '08:00 - 21:00 WIB',
   currency: 'IDR',
   defaultTimezone: 'Asia/Jakarta',
-  supportEmail: 'info@anantaliatrans.com',
+  supportEmail: 'Anantalia.trans80@gmail.com',
   companyDescription: 'Layanan sewa bus pariwisata, hiace, dan armada premium Anatalia Trans.',
   whatsappNumber: '6281383333707',
+  instagramUrl: 'https://www.instagram.com/anantalia_trans?gwpx=M2I2cTIwN285Z3Vk',
+  tiktokUrl: 'https://www.tiktok.com/@anantalia_trans?_r=1&_t=ZS-9BbYTxWsOUo',
   websiteUrl: 'https://anantaliatrans.com',
   operatingDays: 'Senin - Minggu',
   holidays: 'Menyesuaikan jadwal operasional',
@@ -105,13 +109,23 @@ export function createSettingsService({ repository, authorizationService, activi
         : normalizedWa.startsWith('0')
           ? `62${normalizedWa.slice(1)}`
           : normalizedWa;
+      const rawAddress = String(merged.address || '').trim();
+      const officialAddress = !rawAddress || rawAddress.toLowerCase() === 'sleman, d.i. yogyakarta'
+        ? DEFAULT_SETTINGS.address
+        : rawAddress;
+      const rawEmail = String(merged.supportEmail || '').trim();
+      const officialEmail = !rawEmail || rawEmail.toLowerCase() === 'info@anantaliatrans.com'
+        ? DEFAULT_SETTINGS.supportEmail
+        : rawEmail;
       return {
         companyName: merged.companyName,
         companyDescription: merged.companyDescription,
-        address: merged.address,
+        address: officialAddress,
         officePhone: merged.officePhone,
         whatsappNumber: officialWa,
-        supportEmail: merged.supportEmail,
+        instagramUrl: merged.instagramUrl,
+        tiktokUrl: merged.tiktokUrl,
+        supportEmail: officialEmail,
         businessHours: merged.businessHours,
         operatingDays: merged.operatingDays,
         websiteTitle: merged.websiteTitle,

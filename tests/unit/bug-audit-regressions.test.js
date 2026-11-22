@@ -923,8 +923,16 @@ test('Anatalia Fleet Integration: deleteModel (hard vs safe deactivate), photo u
   });
   const pubCfgDefault = await settingsSvc.getPublicSiteConfig();
   assert.equal(pubCfgDefault.whatsappNumber, '6281383333707');
+  assert.equal(pubCfgDefault.supportEmail, 'Anantalia.trans80@gmail.com');
+  assert.match(pubCfgDefault.address, /Gunung Sindur/i);
+  assert.match(pubCfgDefault.instagramUrl, /instagram\.com\/anantalia_trans/i);
+  assert.match(pubCfgDefault.tiktokUrl, /tiktok\.com\/@anantalia_trans/i);
 
   await settingsRepo.upsertSetting('whatsappNumber', '6281234567890');
+  await settingsRepo.upsertSetting('supportEmail', 'info@anantaliatrans.com');
+  await settingsRepo.upsertSetting('address', 'Sleman, D.I. Yogyakarta');
   const pubCfgSanitized = await settingsSvc.getPublicSiteConfig();
   assert.equal(pubCfgSanitized.whatsappNumber, '6281383333707');
+  assert.equal(pubCfgSanitized.supportEmail, 'Anantalia.trans80@gmail.com');
+  assert.match(pubCfgSanitized.address, /Gunung Sindur/i);
 });
