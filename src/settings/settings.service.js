@@ -27,7 +27,7 @@ const ALLOWED_SETTING_KEYS = new Set([
 
 const DEFAULT_SETTINGS = Object.freeze({
   companyName: 'Anantalia Trans',
-  address: 'Sleman, D.I. Yogyakarta',
+  address: 'Jl. Taman Cendana Indah No.09 Blok B, Pengasinan, Kec. Gunung Sindur, Kabupaten Bogor, Jawa Barat 16340',
   officePhone: '',
   businessHours: '08:00 - 21:00 WIB',
   currency: 'IDR',
