@@ -936,3 +936,15 @@ test('Anatalia Fleet Integration: deleteModel (hard vs safe deactivate), photo u
   assert.equal(pubCfgSanitized.supportEmail, 'Anantalia.trans80@gmail.com');
   assert.match(pubCfgSanitized.address, /Gunung Sindur/i);
 });
+
+test('CMS validateSafeUrl accepts pasted external URLs, www. normalization, and data:image payloads', async () => {
+  const { validateSafeUrl } = await import('../../src/content/content.service.js');
+  assert.equal(validateSafeUrl('https://cdn.example.com/promo.jpg', { allowDataImage: true }), 'https://cdn.example.com/promo.jpg');
+  assert.equal(validateSafeUrl('  www.example.com/banner.webp  ', { allowDataImage: true }), 'https://www.example.com/banner.webp');
+  assert.equal(validateSafeUrl('/api/v1/public/content-media/abc', { allowDataImage: true }), '/api/v1/public/content-media/abc');
+  assert.equal(
+    validateSafeUrl('data:image/avif;base64, AAAA\nBBBB==', { allowDataImage: true }),
+    'data:image/avif;base64,AAAABBBB==',
+  );
+  assert.throws(() => validateSafeUrl('javascript:alert(1)', { allowDataImage: true }), { code: 'INVALID_INPUT' });
+});

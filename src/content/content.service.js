@@ -24,18 +24,28 @@ export function validateSafeUrl(value, { allowDataImage = false, fieldName = 'UR
   const trimmed = value.trim();
   if (!trimmed) return null;
 
-  if (allowDataImage && /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
-    if (trimmed.length > 360000) {
+  if (allowDataImage && /^data:image\/(png|jpeg|jpg|webp|gif|avif);base64,/i.test(trimmed)) {
+    const compact = trimmed.replace(/\s+/g, '');
+    if (!/^data:image\/(png|jpeg|jpg|webp|gif|avif);base64,[A-Za-z0-9+/=]+$/i.test(compact)) {
+      const err = new Error(`${fieldName} data:image format is invalid`);
+      err.code = 'INVALID_INPUT';
+      err.status = 400;
+      throw err;
+    }
+    if (compact.length > 360000) {
       const err = new Error(`${fieldName} image payload exceeds size limit`);
       err.code = 'INVALID_INPUT';
       err.status = 400;
       throw err;
     }
-    return trimmed;
+    return compact;
   }
 
   if (/^(https?:\/\/|\/|#)/i.test(trimmed)) {
     return trimmed;
+  }
+  if (/^www\.[a-z0-9-]+(\.[a-z0-9-]+)+/i.test(trimmed)) {
+    return `https://${trimmed}`;
   }
 
   const err = new Error(`${fieldName} must start with https://, http://, /, or #`);
